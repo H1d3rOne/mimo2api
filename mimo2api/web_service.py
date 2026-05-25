@@ -1,6 +1,4 @@
 import asyncio
-import base64
-import binascii
 import json
 import logging
 import time
@@ -26,20 +24,7 @@ except ImportError:
 
 MODEL_MAPPING_FILE = Path(__file__).parent.parent / "model_mapping.json"
 
-# 引入 Manager 长驻协程任务
 from .manager import start_manager_tasks, trigger_rebuild
-
-# Responses API 转换器
-from .responses_converter import convert_request as responses_convert_request
-from .responses_converter import convert_response as responses_convert_response
-from .responses_converter import ResponsesStreamConverter
-from .audio_helpers import (
-    AudioSpeechRequest,
-    audio_media_type,
-    extract_audio_payload,
-    map_openai_tts_model,
-    map_openai_tts_voice,
-)
 from .auth import (
     get_webui_username,
     is_ai_auth_enabled,
@@ -615,222 +600,12 @@ async def collect_response_body(current_req_id: str, current_queue: asyncio.Queu
 # -------------- API 路由定义 --------------
 
 @app.post("/v1/audio/speech")
-async def audio_speech_handler(payload: AudioSpeechRequest):
-    if not state.active_clients:
-        return Response("Gateway Error: 没有可用的内网节点", status_code=503)
-
-    input_text = payload.input.strip()
-    if not input_text:
-        return JSONResponse({"error": {"message": "`input` 不能为空"}}, status_code=400)
-
-    messages = []
-    if isinstance(payload.instructions, str) and payload.instructions.strip():
-        messages.append({"role": "user", "content": payload.instructions})
-    messages.append({"role": "assistant", "content": input_text})
-
-    mimo_payload = {
-        "model": map_openai_tts_model(payload.model),
-        "messages": messages,
-        "audio": {"format": payload.response_format.lower(), "voice": map_openai_tts_voice(payload.voice)},
-    }
-    body_text = json.dumps(mimo_payload, ensure_ascii=False)
-    
-    max_retries = min(MAX_RETRIES, get_available_client_count())
-    if max_retries == 0:
-        return Response("Gateway Error: 没有可用的内网节点", status_code=503)
-        
-    retry_state = RetryState()
-    route_key = "/v1/audio/speech"
-    request_started_at = time.monotonic()
-    record_request_started(route_key, is_streaming=False)
-
-    for attempt in range(max_retries):
-        req_id = "unknown"
-        try:
-            prepared = await prepare_forward_attempt(method="POST", path="/v1/chat/completions", body=body_text, log_label="TTS 映射请求", retry_state=retry_state, attempt_number=attempt + 1)
-            if prepared is None:
-                continue
-            req_id = prepared.req_id
-            queue = prepared.queue
-            first_msg = prepared.first_msg
-            first_byte_at = time.monotonic()
-
-            raw_body = await collect_response_body(req_id, queue)
-            status_code = first_msg.get("status", 200)
-            
-            if status_code >= 400:
-                record_error(route_key, status_code, f"上游返回 {status_code}", detail=raw_body[:500])
-                content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
-                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
-                return Response(raw_body, status_code=status_code, media_type=content_type, headers=response_headers)
-
-            try:
-                response_json = json.loads(raw_body)
-            except json.JSONDecodeError:
-                record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
-                return JSONResponse({"error": {"message": "上游 TTS 返回了非法 JSON"}}, status_code=502)
-
-            audio_b64, actual_format = extract_audio_payload(response_json)
-            if not audio_b64:
-                record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
-                return JSONResponse({"error": {"message": "上游 TTS 响应里没有音频数据"}}, status_code=502)
-
-            try:
-                audio_bytes = base64.b64decode(audio_b64, validate=True)
-            except binascii.Error:
-                try:
-                    audio_bytes = base64.b64decode(audio_b64)
-                except (binascii.Error, TypeError):
-                    record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
-                    return JSONResponse({"error": {"message": "上游 TTS 音频数据损坏"}}, status_code=502)
-
-            record_request_finished(route_key=route_key, status_code=200, started_at=request_started_at, first_byte_at=first_byte_at, success=True)
-            return Response(audio_bytes, media_type=audio_media_type((actual_format or payload.response_format).lower()))
-
-        except asyncio.TimeoutError:
-            retry_state.status_code = 504
-            retry_state.response_text = "Gateway Error: 请求内网节点超时 (30s)"
-            cleanup_pending_request(req_id)
-            continue
-        except RuntimeError as exc:
-            retry_state.status_code = 502
-            retry_state.response_text = f"Gateway Error: {exc}"
-            cleanup_pending_request(req_id)
-            continue
-        except Exception as e:
-            cleanup_pending_request(req_id)
-            raise e
-
-    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False)
-    return Response(retry_state.response_text, status_code=retry_state.status_code)
+async def audio_speech_handler(request: Request):
+    return await _forward_request(request, "/v1/audio/speech")
 
 @app.post("/v1/responses")
 async def responses_handler(request: Request):
-    if not state.active_clients:
-        return Response("Gateway Error: 没有可用的内网节点", status_code=503)
-
-    body = await request.body()
-    try:
-        req_body = json.loads(body.decode("utf-8", "ignore").lstrip("\ufeff"))
-        chat_req = responses_convert_request(req_body)
-    except Exception as exc:
-        record_error("/v1/responses", 400, f"请求解析/转换失败: {exc}")
-        return JSONResponse({"error": {"message": f"请求解析失败: {exc}"}}, status_code=400)
-
-    model = chat_req.get("model", "")
-    is_streaming = chat_req.get("stream", False) is True
-    if "stream" not in req_body:
-        is_streaming = True
-        chat_req["stream"] = True
-
-    chat_body_text = json.dumps(chat_req, ensure_ascii=False)
-    max_retries = min(MAX_RETRIES, get_available_client_count())
-    if max_retries == 0:
-        return Response("Gateway Error: 没有可用的内网节点", status_code=503)
-        
-    retry_state = RetryState()
-    route_key = "/v1/responses"
-    request_started_at = time.monotonic()
-    record_request_started(route_key, is_streaming=is_streaming)
-
-    for attempt in range(max_retries):
-        req_id = "unknown"
-        try:
-            prepared = await prepare_forward_attempt(method="POST", path="/v1/chat/completions", body=chat_body_text, log_label="Responses 映射请求", retry_state=retry_state, attempt_number=attempt + 1)
-            if prepared is None:
-                continue
-            req_id = prepared.req_id
-            queue = prepared.queue
-            first_msg = prepared.first_msg
-            status_code = first_msg.get("status", 200)
-            first_byte_at = time.monotonic()
-
-            if status_code >= 400:
-                content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
-                raw_body = await collect_response_body(req_id, queue)
-                record_error("/v1/responses", status_code, f"上游返回 {status_code}", detail=raw_body[:500])
-                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
-                return Response(raw_body, status_code=status_code, media_type=content_type, headers=response_headers)
-
-            if is_streaming:
-                converter = ResponsesStreamConverter(model=model)
-
-                async def responses_stream_generator(current_req_id, current_queue):
-                    last_data_time = time.monotonic()
-                    stream_succeeded = False
-                    data_task = asyncio.ensure_future(current_queue.get())
-
-                    async def _do_keepalive():
-                        await asyncio.sleep(STREAM_KEEPALIVE_INTERVAL)
-                        return b": keep-alive\n\n"
-                    keepalive_task = asyncio.ensure_future(_do_keepalive())
-
-                    try:
-                        while True:
-                            done, _ = await asyncio.wait({data_task, keepalive_task}, return_when=asyncio.FIRST_COMPLETED)
-
-                            if keepalive_task in done:
-                                elapsed = time.monotonic() - last_data_time
-                                if elapsed > STREAM_CHUNK_TIMEOUT:
-                                    logger.warning(f"⚠️ Responses 流式 {elapsed:.0f}s 无数据，节点可能已断开 [{current_req_id[:8]}]")
-                                    break
-                                yield keepalive_task.result()
-                                keepalive_task = asyncio.ensure_future(_do_keepalive())
-                                continue
-
-                            last_data_time = time.monotonic()
-                            data_task = asyncio.ensure_future(current_queue.get())
-                            msg = done.pop().result()
-                            if msg.get("type") == "finish":
-                                stream_succeeded = True
-                                for evt in converter.finalize():
-                                    yield evt.encode("utf-8")
-                                break
-                            elif msg.get("type") == "error":
-                                err_evt = f"event: error\ndata: {json.dumps({'type': 'error', 'message': msg.get('body')})}\n\n"
-                                yield err_evt.encode("utf-8")
-                                break
-                            elif msg.get("type") == "chunk":
-                                for line in msg.get("body", "").split("\n"):
-                                    for evt in converter.process_chunk(line):
-                                        yield evt.encode("utf-8")
-                    finally:
-                        data_task.cancel()
-                        keepalive_task.cancel()
-                        await asyncio.gather(data_task, keepalive_task, return_exceptions=True)
-                        cleanup_pending_request(current_req_id)
-                        usage_obj = getattr(converter, "_usage", None)
-                        record_request_finished(route_key=route_key, status_code=status_code if stream_succeeded else 502, started_at=request_started_at, first_byte_at=first_byte_at, success=stream_succeeded, usage=usage_obj.model_dump() if usage_obj else None)
-
-                return StreamingResponse(
-                    responses_stream_generator(req_id, queue),
-                    status_code=status_code,
-                    media_type="text/event-stream",
-                    headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
-                )
-            else:
-                raw_body = await collect_response_body(req_id, queue)
-                try:
-                    chat_resp = json.loads(raw_body)
-                except json.JSONDecodeError:
-                    record_request_finished(route_key=route_key, status_code=502, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
-                    return JSONResponse({"error": {"message": "上游返回了非法 JSON"}}, status_code=502)
-
-                responses_resp = responses_convert_response(chat_resp)
-                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=True, usage=chat_resp.get("usage"))
-                return JSONResponse(content=responses_resp)
-
-        except asyncio.TimeoutError:
-            retry_state.status_code = 504
-            retry_state.response_text = "Gateway Error: 请求内网节点超时"
-            cleanup_pending_request(req_id)
-            continue
-        except Exception as e:
-            cleanup_pending_request(req_id)
-            raise e
-
-    record_request_finished(route_key=route_key, status_code=retry_state.status_code, started_at=request_started_at, first_byte_at=None, success=False)
-    return Response(retry_state.response_text, status_code=retry_state.status_code)
+    return await _forward_request(request, "/v1/responses")
 
 _MODELS = [
     ("mimo-v2.5-pro", "MiMo V2.5 Pro", 1048576, 131072),
