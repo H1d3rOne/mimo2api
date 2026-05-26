@@ -640,6 +640,80 @@ async def get_anthropic_models():
     ]
     return JSONResponse(content={"data": data, "has_more": False, "first_id": data[0]["id"], "last_id": data[-1]["id"]})
 
+@app.post("/api/test_model")
+async def test_model_handler(request: Request):
+    body = await request.body()
+    try:
+        data = json.loads(body.decode("utf-8", "ignore").lstrip("\ufeff"))
+    except json.JSONDecodeError:
+        return JSONResponse({"ok": False, "error": "请求体不是合法 JSON"}, status_code=400)
+
+    model = data.get("model", "mimo-v2-flash")
+    test_payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 16,
+        "stream": False,
+    }, ensure_ascii=False)
+
+    if not state.active_clients:
+        return JSONResponse({"ok": False, "model": model, "error": "没有可用的内网节点"})
+
+    max_retries = min(MAX_RETRIES, get_available_client_count())
+    retry_state = RetryState()
+    route_key = "/api/test_model"
+    request_started_at = time.monotonic()
+
+    for attempt in range(max_retries):
+        req_id = "unknown"
+        try:
+            prepared = await prepare_forward_attempt(
+                method="POST", path="/v1/chat/completions", body=test_payload,
+                log_label="模型测试", retry_state=retry_state, attempt_number=attempt + 1,
+            )
+            if prepared is None:
+                continue
+            req_id = prepared.req_id
+            queue = prepared.queue
+            first_msg = prepared.first_msg
+            status_code = first_msg.get("status", 200)
+            first_byte_at = time.monotonic()
+
+            if status_code >= 400:
+                raw_body = await collect_response_body(req_id, queue)
+                record_error(route_key, status_code, f"上游返回 {status_code}", detail=raw_body[:500])
+                record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=False)
+                return JSONResponse({"ok": False, "model": model, "error": f"上游返回 {status_code}"})
+
+            raw_body = await collect_response_body(req_id, queue)
+            record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=True)
+
+            try:
+                resp_json = json.loads(raw_body)
+                content = ""
+                choices = resp_json.get("choices", [])
+                if choices:
+                    content = choices[0].get("message", {}).get("content", "")
+                return JSONResponse({"ok": True, "model": model, "response": content})
+            except json.JSONDecodeError:
+                return JSONResponse({"ok": True, "model": model, "response": "(响应解析失败)"})
+
+        except asyncio.TimeoutError:
+            retry_state.status_code = 504
+            retry_state.response_text = "请求超时"
+            cleanup_pending_request(req_id)
+            continue
+        except RuntimeError as exc:
+            retry_state.status_code = 502
+            retry_state.response_text = str(exc)
+            cleanup_pending_request(req_id)
+            continue
+        except Exception as e:
+            cleanup_pending_request(req_id)
+            raise e
+
+    return JSONResponse({"ok": False, "model": model, "error": retry_state.response_text})
+
 @app.post("/v1/chat/completions")
 async def chat_completions_handler(request: Request):
     return await _forward_request(request, "/v1/chat/completions")

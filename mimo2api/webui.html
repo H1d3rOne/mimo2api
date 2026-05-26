@@ -395,6 +395,27 @@
             </div>
         </div>
 
+        <!-- 模型测试卡片 -->
+        <div class="glass-card">
+            <div class="flex-between">
+                <h2 style="margin: 0; font-size: 18px;">模型连通性测试</h2>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <select id="testModelSelect" class="text-input" style="width: auto; padding: 8px 12px; font-size: 13px;">
+                        <option value="mimo-v2-flash">mimo-v2-flash</option>
+                        <option value="mimo-v2.5-pro">mimo-v2.5-pro</option>
+                        <option value="mimo-v2.5">mimo-v2.5</option>
+                        <option value="mimo-v2-pro">mimo-v2-pro</option>
+                        <option value="mimo-v2-omni">mimo-v2-omni</option>
+                    </select>
+                    <button class="btn" id="testModelBtn" onclick="testModel()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                        测试
+                    </button>
+                </div>
+            </div>
+            <div id="testResult" style="margin-top: 12px; display: none; padding: 12px 16px; border-radius: 8px; font-size: 14px; line-height: 1.6;"></div>
+        </div>
+
         <!-- 用户管理卡片 -->
         <div class="glass-card">
             <div class="flex-between">
@@ -639,6 +660,45 @@
                 webAuthReady = false;
                 setShellVisibility(false);
                 document.getElementById('loginPassword').value = '';
+            }
+        }
+
+        async function testModel() {
+            const model = document.getElementById('testModelSelect').value;
+            const btn = document.getElementById('testModelBtn');
+            const resultDiv = document.getElementById('testResult');
+
+            btn.disabled = true;
+            btn.textContent = '测试中...';
+            resultDiv.style.display = 'block';
+            resultDiv.style.background = 'rgba(245, 158, 11, 0.1)';
+            resultDiv.style.color = '#92400E';
+            resultDiv.textContent = `正在测试 ${model}，发送 "hi"...`;
+
+            try {
+                const res = await apiFetch('/api/test_model', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ model })
+                });
+                const data = await res.json();
+
+                if (data.ok) {
+                    resultDiv.style.background = 'rgba(16, 185, 129, 0.1)';
+                    resultDiv.style.color = '#047857';
+                    resultDiv.innerHTML = `<strong>✓ ${data.model} 连通正常</strong><br><span style="color: var(--text-muted);">回复: ${data.response}</span>`;
+                } else {
+                    resultDiv.style.background = 'rgba(239, 68, 68, 0.1)';
+                    resultDiv.style.color = '#991B1B';
+                    resultDiv.innerHTML = `<strong>✗ ${data.model} 连通失败</strong><br><span style="color: var(--text-muted);">${data.error}</span>`;
+                }
+            } catch (e) {
+                resultDiv.style.background = 'rgba(239, 68, 68, 0.1)';
+                resultDiv.style.color = '#991B1B';
+                resultDiv.innerHTML = `<strong>✗ 请求异常</strong><br><span style="color: var(--text-muted);">${e.message}</span>`;
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg> 测试';
             }
         }
 
