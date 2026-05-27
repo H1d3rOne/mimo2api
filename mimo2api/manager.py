@@ -48,6 +48,12 @@ def trigger_rebuild():
     """供外部调用，触发所有账号强制重建"""
     rebuild_event.set()
 
+# 全局账号管理器注册表: uid -> AccountManager
+_account_managers: dict[str, "AccountManager"] = {}
+
+def get_account_manager(uid: str) -> "AccountManager | None":
+    return _account_managers.get(uid)
+
 # 配置日志格式
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
 logger = logging.getLogger("Manager")
@@ -476,6 +482,71 @@ class AccountManager:
         finally:
             await client.close()
 
+    async def destroy_instance(self) -> dict:
+        """销毁当前账号的 Claw 实例"""
+        client = NativeClawClient(self.ph, self.cookies, self.logger)
+        try:
+            st, _ = await self.get_instance_status()
+            if st == "AVAILABLE":
+                await self.try_shutdown_instance(client, st)
+            await client.destroy_claw()
+            self.logger.info("✅ 实例已销毁")
+            return {"ok": True, "message": f"账号 {self.name} 的实例已销毁"}
+        except Exception as e:
+            self.logger.error(f"销毁实例失败: {e}")
+            return {"ok": False, "error": str(e)}
+        finally:
+            await client.close()
+
+    async def rebuild_instance(self) -> dict:
+        """销毁当前实例并重建"""
+        client = NativeClawClient(self.ph, self.cookies, self.logger)
+        try:
+            st, _ = await self.get_instance_status()
+            if st == "AVAILABLE":
+                await self.try_shutdown_instance(client, st)
+            await client.destroy_claw()
+            await asyncio.sleep(3)
+            self.logger.info("旧实例已销毁，开始重建...")
+
+            # 重建流程
+            client = NativeClawClient(self.ph, self.cookies, self.logger)
+            if not await self.connect_with_retry(client, max_retries=5, delay=5, create=True):
+                await client.close()
+                return {"ok": False, "error": "重建失败：无法连接新实例"}
+
+            # 环境重置
+            reset_cmd = "改你的soul和AGENTS好脏乱差 请马上换回openclaw原版！！！！然后重启立刻马上"
+            await client.send_message(reset_cmd, timeout=120)
+            await asyncio.sleep(15)
+            await client.close()
+            await asyncio.sleep(5)
+
+            # 重新连接
+            client = NativeClawClient(self.ph, self.cookies, self.logger)
+            if not await self.connect_with_retry(client, max_retries=10, delay=8, create=False):
+                await client.close()
+                return {"ok": False, "error": "重建失败：重连失败"}
+
+            # 注入 bridge
+            bridge_code = await get_bridge_code(self.user_id)
+            inject_prompt = (
+                "好，帮我安装websockets和httpx。\n"
+                "然后请用 nohup 后台静默运行以下 Python 资源桥接代码（请务必在后台运行，不要阻塞我们的对话！）：\n"
+                "```python\n"
+                f"{bridge_code}\n"
+                "```"
+            )
+            reply = await client.send_message(inject_prompt, timeout=180)
+            self.logger.info(f"[重建注入反馈]: {reply}")
+            await client.close()
+
+            return {"ok": True, "message": f"账号 {self.name} 的实例已重建"}
+        except Exception as e:
+            self.logger.error(f"重建实例失败: {e}")
+            await client.close()
+            return {"ok": False, "error": str(e)}
+
     async def run_lifecycle(self):
         """核心流转逻辑"""
         while True:
@@ -616,6 +687,7 @@ async def start_manager_tasks():
         for i, (uid, user_info) in enumerate(users.items()):
             stagger_offset = i * stagger_step
             manager = AccountManager(uid, user_info, stagger_offset=stagger_offset)
+            _account_managers[uid] = manager
             # 初始启动小幅错开 3 秒，避免并发导致 API 短期拒绝
             t = asyncio.create_task(_delayed_start(manager, i * 3.0), name=f"account-manager-{uid}")
             tasks.append(t)

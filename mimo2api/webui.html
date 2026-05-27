@@ -626,7 +626,14 @@
                         </span>
                     </td>
                     <td>
-                        <button class="btn btn-danger" onclick="deleteUser('${u.userId}')">删除</button>
+                        <div style="position: relative; display: inline-block;">
+                            <button class="btn" onclick="toggleMenu('${u.userId}')" style="padding: 4px 10px; font-size: 16px; line-height: 1;">&#8230;</button>
+                            <div id="menu-${u.userId}" style="display:none; position:absolute; right:0; top:100%; z-index:100; background:white; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); min-width:120px; overflow:hidden;">
+                                <div onclick="deleteUser('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#EF4444; border-bottom:1px solid #f0f0f0;" onmouseover="this.style.background='#FEF2F2'" onmouseout="this.style.background='white'">删除账号</div>
+                                <div onclick="destroyInstance('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#F59E0B; border-bottom:1px solid #f0f0f0;" onmouseover="this.style.background='#FFFBEB'" onmouseout="this.style.background='white'">销毁实例</div>
+                                <div onclick="rebuildInstance('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#3B82F6;" onmouseover="this.style.background='#EFF6FF'" onmouseout="this.style.background='white'">重建实例</div>
+                            </div>
+                        </div>
                     </td>
                 </tr>`;
             }).join('');
@@ -748,6 +755,56 @@
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg> 测试';
+            }
+        }
+
+        function toggleMenu(userId) {
+            const menu = document.getElementById(`menu-${userId}`);
+            // 关闭所有其他菜单
+            document.querySelectorAll('[id^="menu-"]').forEach(m => {
+                if (m !== menu) m.style.display = 'none';
+            });
+            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // 点击页面其他区域关闭菜单
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('[id^="menu-"]') && !e.target.closest('button[onclick*="toggleMenu"]')) {
+                document.querySelectorAll('[id^="menu-"]').forEach(m => m.style.display = 'none');
+            }
+        });
+
+        async function destroyInstance(userId) {
+            document.getElementById(`menu-${userId}`).style.display = 'none';
+            if (!confirm(`确定要销毁账号 ${userId} 的实例吗？`)) return;
+            try {
+                const res = await apiFetch(`/api/users/destroy/${userId}`, { method: 'POST' });
+                const data = await res.json();
+                if (data.ok) {
+                    alert(`销毁成功: ${data.message}`);
+                } else {
+                    alert(`销毁失败: ${data.error}`);
+                }
+                fetchUsers();
+            } catch(e) {
+                alert(`请求异常: ${e.message}`);
+            }
+        }
+
+        async function rebuildInstance(userId) {
+            document.getElementById(`menu-${userId}`).style.display = 'none';
+            if (!confirm(`确定要重建账号 ${userId} 的实例吗？将先销毁再重新创建。`)) return;
+            try {
+                const res = await apiFetch(`/api/users/rebuild/${userId}`, { method: 'POST' });
+                const data = await res.json();
+                if (data.ok) {
+                    alert(`重建成功: ${data.message}`);
+                } else {
+                    alert(`重建失败: ${data.error}`);
+                }
+                fetchUsers();
+            } catch(e) {
+                alert(`请求异常: ${e.message}`);
             }
         }
 
