@@ -766,6 +766,7 @@
             menu.style.cssText = 'position:fixed; z-index:10000; background:white; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); min-width:120px; overflow:hidden;';
 
             const items = [
+                { label: '新建实例', color: '#10B981', hover: '#ECFDF5', action: () => createInstance(userId) },
                 { label: '销毁实例', color: '#F59E0B', hover: '#FFFBEB', action: () => destroyInstance(userId) },
                 { label: '重建实例', color: '#3B82F6', hover: '#EFF6FF', action: () => rebuildInstance(userId) },
                 { label: '删除账号', color: '#EF4444', hover: '#FEF2F2', action: () => deleteUser(userId) },
@@ -805,6 +806,23 @@
                 _activeMenu = null;
             }
         });
+
+        async function createInstance(userId) {
+            if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }
+            if (!confirm(`确定要为账号 ${userId} 新建实例吗？`)) return;
+            try {
+                const res = await apiFetch(`/api/users/create/${userId}`, { method: 'POST' });
+                const data = await res.json();
+                if (data.ok) {
+                    alert(`创建成功: ${data.message}`);
+                } else {
+                    alert(`创建失败: ${data.error}`);
+                }
+                fetchUsers();
+            } catch(e) {
+                alert(`请求异常: ${e.message}`);
+            }
+        }
 
         async function destroyInstance(userId) {
             if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }

@@ -207,6 +207,15 @@ async def api_users_destroy(uid: str):
     result = await mgr.destroy_instance()
     return JSONResponse(result)
 
+@router.post("/api/users/create/{uid}")
+async def api_users_create(uid: str):
+    from .manager import get_account_manager
+    mgr = get_account_manager(uid)
+    if not mgr:
+        return JSONResponse({"ok": False, "error": f"账号 {uid} 未找到"}, status_code=404)
+    result = await mgr.create_instance()
+    return JSONResponse(result)
+
 @router.post("/api/users/rebuild/{uid}")
 async def api_users_rebuild(uid: str):
     from .manager import get_account_manager
