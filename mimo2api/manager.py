@@ -486,9 +486,6 @@ class AccountManager:
         """销毁当前账号的 Claw 实例"""
         client = NativeClawClient(self.ph, self.cookies, self.logger)
         try:
-            st, _ = await self.get_instance_status()
-            if st == "AVAILABLE":
-                await self.try_shutdown_instance(client, st)
             await client.destroy_claw()
             self.logger.info("✅ 实例已销毁")
             return {"ok": True, "message": f"账号 {self.name} 的实例已销毁"}
@@ -502,9 +499,6 @@ class AccountManager:
         """销毁当前实例并重建"""
         client = NativeClawClient(self.ph, self.cookies, self.logger)
         try:
-            st, _ = await self.get_instance_status()
-            if st == "AVAILABLE":
-                await self.try_shutdown_instance(client, st)
             await client.destroy_claw()
             await asyncio.sleep(3)
             self.logger.info("旧实例已销毁，开始重建...")
