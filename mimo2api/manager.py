@@ -547,7 +547,7 @@ class AccountManager:
         """销毁当前实例并重建"""
         st, _ = await self.get_instance_status()
         if st != "AVAILABLE":
-            return {"ok": False, "error": f"账号 {self.name} 没有在线实例，无法重建。请使用"新建实例""}
+            return {"ok": False, "error": f"账号 {self.name} 没有在线实例，无法重建，请使用「新建实例」"}
 
         client = NativeClawClient(self.ph, self.cookies, self.logger)
         try:
