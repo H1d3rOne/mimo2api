@@ -82,7 +82,7 @@ def load_all_users() -> dict:
     return users
 
 
-async def get_bridge_code() -> str:
+async def get_bridge_code(user_id: str = "") -> str:
     """读取本地 bridge 代码文本"""
     import re
     bridge_path = os.path.join(os.path.dirname(__file__), "bridge.py")
@@ -90,13 +90,14 @@ async def get_bridge_code() -> str:
         with open(bridge_path, "r", encoding="utf-8") as f:
             return f.read()
     code = await asyncio.to_thread(_read)
-    
+
     # 获取全局 main.py 配置入口配置好的统一穿透通信地址，若缺失则降级 fallback
     ws_url = os.environ.get("MIMO2API_WS_URL")
     if not ws_url:
         raise ValueError("MIMO2API_WS_URL环境变量未配置")
     # 动态把桥接脚本里面原来写死的 WS_URL 给替换掉，并返回修改后的代码块。
     code = code.replace("__WS_URL__", ws_url)
+    code = code.replace("__USER_ID__", user_id)
     return code
 
 
@@ -489,7 +490,7 @@ class AccountManager:
                 if st == "AVAILABLE" and remain_sec > 180:
                     self.logger.info(f"发现可用宿主环境！尝试直接免重启挂载接入...")
                     if await self.connect_with_retry(client, max_retries=3, delay=5, create=False):
-                        bridge_code = await get_bridge_code()
+                        bridge_code = await get_bridge_code(self.user_id)
                         inject_prompt = (
                             "好，请检查当前环境是否有 websockets 和 httpx 依赖（如果没有请马上安装）。\n"
                             "然后，请先将当前主机上正在运行（如果有的话）的所有资源桥接脚本进程杀掉（例如寻找并 kill 掉包含 ws:// 连结的后台 python 进程），"
@@ -555,7 +556,7 @@ class AccountManager:
 
                 # 5. 注入核心桥接通信脚本
                 self.logger.info("正解析并注入 mimo2api bridge.py ...")
-                bridge_code = await get_bridge_code()
+                bridge_code = await get_bridge_code(self.user_id)
                 inject_prompt = (
                     "好，帮我安装websockets和httpx。\n"
                     "然后请用 nohup 后台静默运行以下 Python 资源桥接代码（请务必在后台运行，不要阻塞我们的对话！）：\n"

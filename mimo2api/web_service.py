@@ -152,7 +152,7 @@ from .ui_router import router as ui_router
 app.include_router(ui_router)
 
 RETRYABLE_STATUS_CODES = {401, 403, 429}
-NODE_RESPONSE_TIMEOUT = 30
+NODE_RESPONSE_TIMEOUT = 15
 MAX_RETRIES = 3
 MAX_PENDING_QUEUES = 2000
 AI_ROUTE_PREFIXES = ("/v1/", "/anthropic/v1/")
@@ -394,6 +394,13 @@ async def ws_tunnel(ws: WebSocket):
         while True:
             msg = await ws.receive_text()
             data = json.loads(msg)
+            # 处理注册消息
+            if data.get("type") == "register":
+                user_id = data.get("user_id", "")
+                if user_id:
+                    state.node_info[id(ws)]["user_id"] = user_id
+                    logger.info(f"📋 节点 {client_addr} 注册为用户 {user_id}")
+                continue
             req_id = data.get("req_id")
             if req_id and req_id in state.pending_queues:
                 touch_pending_request(req_id)
@@ -437,10 +444,9 @@ def get_next_client() -> WebSocket | None:
             available_clients.append(client)
     if not available_clients:
         return None
-    if state.current_client_index >= len(available_clients):
-        state.current_client_index = 0
-    client = available_clients[state.current_client_index]
-    state.current_client_index = (state.current_client_index + 1) % len(available_clients)
+    # 优先选择已服务请求数最少的节点（最少负载优先）
+    available_clients.sort(key=lambda c: state.node_info.get(id(c), {}).get("requests_served", 0))
+    client = available_clients[0]
     return client
 
 
@@ -542,6 +548,7 @@ async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str,
         first_msg = await asyncio.wait_for(queue.get(), timeout=NODE_RESPONSE_TIMEOUT)
     except asyncio.TimeoutError:
         record_attempt_finished(target_ws=target_ws, status_code=504, first_byte_latency_ms=(time.monotonic() - attempt_started_at) * 1000, success=False)
+        cooldown_client(target_ws, 30, "响应超时")
         raise
 
     record_attempt_finished(

@@ -395,14 +395,6 @@
             </div>
         </div>
 
-        <!-- 桥接状态卡片 -->
-        <div class="glass-card" id="bridgeCard">
-            <h2 style="margin: 0 0 16px 0; font-size: 18px;">桥接节点状态</h2>
-            <div id="bridgeNodes">
-                <div class="empty-state">加载中...</div>
-            </div>
-        </div>
-
         <!-- 模型测试卡片 -->
         <div class="glass-card">
             <div class="flex-between">
@@ -441,12 +433,13 @@
                             <th>用户 ID (User ID)</th>
                             <th>备注名</th>
                             <th>实例状态 / 剩余时长</th>
+                            <th>桥接状态</th>
                             <th>ServiceToken 简览</th>
                             <th>操作</th>
                         </tr>
                     </thead>
                     <tbody id="usersBody">
-                        <tr><td colspan="5" class="empty-state">加载中...</td></tr>
+                        <tr><td colspan="6" class="empty-state">加载中...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -542,6 +535,8 @@
             }, 3000);
         }
 
+        let bridgeNodes = [];
+
         async function fetchStatus() {
             // 认证开启但未登录时，跳过状态请求（避免 401 清空密码输入框）
             if (webAuthEnabled && !webAuthReady) return;
@@ -550,7 +545,7 @@
                 const data = await res.json();
                 const indicator = document.getElementById('statusIndicator');
                 const text = document.getElementById('statusText');
-                
+
                 if (data.active_clients > 0) {
                     indicator.className = 'status-indicator';
                     text.textContent = `内网通信节点保持连接: ${data.active_clients} 个`;
@@ -559,65 +554,74 @@
                     text.textContent = `危险！没有任何一个内网节点在线，所有 API 请求将被退回`;
                 }
 
-                // 渲染桥接节点列表
-                const bridgeDiv = document.getElementById('bridgeNodes');
-                const nodes = data.nodes || [];
-                if (nodes.length > 0) {
-                    bridgeDiv.innerHTML = nodes.map((n, i) => {
-                        const uptimeMin = Math.floor(n.uptime / 60);
-                        const uptimeSec = n.uptime % 60;
-                        const uptimeStr = uptimeMin > 0 ? `${uptimeMin}分${uptimeSec}秒` : `${uptimeSec}秒`;
-                        return `<div style="display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(0,0,0,0.05);">
-                            <div style="width: 10px; height: 10px; background: #10B981; border-radius: 50%; box-shadow: 0 0 6px #10B981; flex-shrink: 0;"></div>
-                            <div style="flex: 1;">
-                                <div style="font-weight: 500; font-size: 14px;">节点 ${i + 1}: <span style="color: var(--text-muted); font-weight: 400;">${n.addr}</span></div>
-                                <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">在线 ${uptimeStr} · 已服务 ${n.requests_served} 个请求</div>
-                            </div>
-                        </div>`;
-                    }).join('');
-                } else {
-                    bridgeDiv.innerHTML = '<div class="empty-state" style="color: #EF4444;">无在线节点</div>';
-                }
+                bridgeNodes = data.nodes || [];
+                renderUsersWithBridge();
             } catch(e) {
                 if (e.message === 'UNAUTHORIZED') {
                     return;
                 }
                 document.getElementById('statusIndicator').className = 'status-indicator offline';
                 document.getElementById('statusText').textContent = '后端连接失败';
-                document.getElementById('bridgeNodes').innerHTML = '<div class="empty-state" style="color: #EF4444;">后端连接失败</div>';
             }
+        }
+
+        let lastUsersData = [];
+
+        function renderUsersWithBridge() {
+            const tbody = document.getElementById('usersBody');
+            if (!lastUsersData || lastUsersData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">当前未加载任何凭证</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = lastUsersData.map(u => {
+                // 匹配桥接节点：通过 userId 关联
+                const matchedNode = bridgeNodes.find(n => n.user_id === u.userId);
+                let bridgeHtml;
+                if (matchedNode) {
+                    const uptimeMin = Math.floor(matchedNode.uptime / 60);
+                    const uptimeSec = matchedNode.uptime % 60;
+                    const uptimeStr = uptimeMin > 0 ? `${uptimeMin}分${uptimeSec}秒` : `${uptimeSec}秒`;
+                    bridgeHtml = `<div style="display:flex;align-items:center;gap:6px;">
+                        <div style="width:8px;height:8px;background:#10B981;border-radius:50%;box-shadow:0 0 4px #10B981;flex-shrink:0;"></div>
+                        <span style="color:#047857;font-weight:500;">在线</span>
+                        <span style="color:var(--text-muted);font-size:12px;">${uptimeStr} · ${matchedNode.requests_served}次</span>
+                    </div>`;
+                } else {
+                    bridgeHtml = `<div style="display:flex;align-items:center;gap:6px;">
+                        <div style="width:8px;height:8px;background:#EF4444;border-radius:50%;flex-shrink:0;"></div>
+                        <span style="color:#991B1B;font-weight:500;">离线</span>
+                    </div>`;
+                }
+
+                return `<tr>
+                    <td><strong style="color:var(--primary)">${u.userId}</strong></td>
+                    <td>${u.name || '(未命名)'}</td>
+                    <td>
+                        <div><strong style="color: ${u.claw_status === 'AVAILABLE' ? '#10B981' : (u.claw_status === 'EXPIRED(401)' ? '#EF4444' : '#F59E0B')}">${u.claw_status || '未知'}</strong></div>
+                        <div class="countdown-text" data-remain="${u.remain_sec}" style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
+                            ${u.remain_sec > 0 ? '剩余: ' + Math.floor(u.remain_sec / 60) + ' 分 ' + (u.remain_sec % 60) + ' 秒' : '已过期/无环境'}
+                        </div>
+                    </td>
+                    <td>${bridgeHtml}</td>
+                    <td>
+                        <span style="display:inline-block; max-width: 120px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: var(--text-muted);">
+                            ${u.serviceToken ? u.serviceToken.substring(0,10)+'...' : '无效'}
+                        </span>
+                    </td>
+                    <td>
+                        <button class="btn btn-danger" onclick="deleteUser('${u.userId}')">删除</button>
+                    </td>
+                </tr>`;
+            }).join('');
         }
 
         async function fetchUsers() {
             try {
                 const res = await apiFetch('/api/users/list');
                 const data = await res.json();
-                const tbody = document.getElementById('usersBody');
-                
-                if (data.users && data.users.length > 0) {
-                    tbody.innerHTML = data.users.map(u => `
-                        <tr>
-                            <td><strong style="color:var(--primary)">${u.userId}</strong></td>
-                            <td>${u.name || '(未命名)'}</td>
-                            <td>
-                                <div><strong style="color: ${u.claw_status === 'AVAILABLE' ? '#10B981' : (u.claw_status === 'EXPIRED(401)' ? '#EF4444' : '#F59E0B')}">${u.claw_status || '未知'}</strong></div>
-                                <div class="countdown-text" data-remain="${u.remain_sec}" style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
-                                    ${u.remain_sec > 0 ? '剩余: ' + Math.floor(u.remain_sec / 60) + ' 分 ' + (u.remain_sec % 60) + ' 秒' : '已过期/无环境'}
-                                </div>
-                            </td>
-                            <td>
-                                <span style="display:inline-block; max-width: 120px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: var(--text-muted);">
-                                    ${u.serviceToken ? u.serviceToken.substring(0,10)+'...' : '无效'}
-                                </span>
-                            </td>
-                            <td>
-                                <button class="btn btn-danger" onclick="deleteUser('${u.userId}')">删除</button>
-                            </td>
-                        </tr>
-                    `).join('');
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">当前未加载任何凭证</td></tr>';
-                }
+                lastUsersData = data.users || [];
+                renderUsersWithBridge();
             } catch(e) {
                 if (e.message !== 'UNAUTHORIZED') {
                     console.error("加载用户列表失败", e);

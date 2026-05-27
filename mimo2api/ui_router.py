@@ -45,11 +45,13 @@ async def api_status():
         addr = info.get("addr", "Unknown")
         connected_at = info.get("connected_at", 0)
         requests_served = info.get("requests_served", 0)
+        user_id = info.get("user_id", "")
         uptime = int(time.time() - connected_at) if connected_at else 0
         nodes.append({
             "addr": addr,
             "uptime": uptime,
             "requests_served": requests_served,
+            "user_id": user_id,
         })
     return JSONResponse({"active_clients": len(state.active_clients), "nodes": nodes})
 
