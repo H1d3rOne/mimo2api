@@ -395,6 +395,14 @@
             </div>
         </div>
 
+        <!-- 桥接状态卡片 -->
+        <div class="glass-card" id="bridgeCard">
+            <h2 style="margin: 0 0 16px 0; font-size: 18px;">桥接节点状态</h2>
+            <div id="bridgeNodes">
+                <div class="empty-state">加载中...</div>
+            </div>
+        </div>
+
         <!-- 模型测试卡片 -->
         <div class="glass-card">
             <div class="flex-between">
@@ -550,12 +558,33 @@
                     indicator.className = 'status-indicator offline';
                     text.textContent = `危险！没有任何一个内网节点在线，所有 API 请求将被退回`;
                 }
+
+                // 渲染桥接节点列表
+                const bridgeDiv = document.getElementById('bridgeNodes');
+                const nodes = data.nodes || [];
+                if (nodes.length > 0) {
+                    bridgeDiv.innerHTML = nodes.map((n, i) => {
+                        const uptimeMin = Math.floor(n.uptime / 60);
+                        const uptimeSec = n.uptime % 60;
+                        const uptimeStr = uptimeMin > 0 ? `${uptimeMin}分${uptimeSec}秒` : `${uptimeSec}秒`;
+                        return `<div style="display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(0,0,0,0.05);">
+                            <div style="width: 10px; height: 10px; background: #10B981; border-radius: 50%; box-shadow: 0 0 6px #10B981; flex-shrink: 0;"></div>
+                            <div style="flex: 1;">
+                                <div style="font-weight: 500; font-size: 14px;">节点 ${i + 1}: <span style="color: var(--text-muted); font-weight: 400;">${n.addr}</span></div>
+                                <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">在线 ${uptimeStr} · 已服务 ${n.requests_served} 个请求</div>
+                            </div>
+                        </div>`;
+                    }).join('');
+                } else {
+                    bridgeDiv.innerHTML = '<div class="empty-state" style="color: #EF4444;">无在线节点</div>';
+                }
             } catch(e) {
                 if (e.message === 'UNAUTHORIZED') {
                     return;
                 }
                 document.getElementById('statusIndicator').className = 'status-indicator offline';
                 document.getElementById('statusText').textContent = '后端连接失败';
+                document.getElementById('bridgeNodes').innerHTML = '<div class="empty-state" style="color: #EF4444;">后端连接失败</div>';
             }
         }
 

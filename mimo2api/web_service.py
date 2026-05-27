@@ -387,6 +387,7 @@ async def ws_tunnel(ws: WebSocket):
     client_addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "Unknown"
     state.active_clients.append(ws)
     state.client_cooldowns.pop(id(ws), None)
+    state.node_info[id(ws)] = {"addr": client_addr, "connected_at": time.time(), "requests_served": 0}
     logger.info(f"✅ 内网节点已接入: {client_addr}。当前在线节点数: {len(state.active_clients)}")
     
     try:
@@ -405,6 +406,7 @@ async def ws_tunnel(ws: WebSocket):
         if ws in state.active_clients:
             state.active_clients.remove(ws)
         state.client_cooldowns.pop(id(ws), None)
+        state.node_info.pop(id(ws), None)
         
         # 清理该节点的所有孤儿队列
         orphan_ids = state.ws_to_req_ids.pop(id(ws), set())
@@ -514,6 +516,11 @@ async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str,
     # 🌟 修复内存泄漏的双向绑定：既知道 WS 管哪些 req_id，也知道 req_id 归属于哪个 WS
     state.req_id_to_ws_id[req_id] = id(target_ws)
     state.ws_to_req_ids.setdefault(id(target_ws), set()).add(req_id)
+
+    # 更新节点请求计数
+    node = state.node_info.get(id(target_ws))
+    if node:
+        node["requests_served"] = node.get("requests_served", 0) + 1
 
     ws_payload = build_ws_payload(req_id, method, path, body)
     attempt_started_at = time.monotonic()

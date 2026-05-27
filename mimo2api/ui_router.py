@@ -39,7 +39,19 @@ async def webui_page():
 
 @router.get("/api/system/status")
 async def api_status():
-    return JSONResponse({"active_clients": len(state.active_clients)})
+    nodes = []
+    for ws in state.active_clients:
+        info = state.node_info.get(id(ws), {})
+        addr = info.get("addr", "Unknown")
+        connected_at = info.get("connected_at", 0)
+        requests_served = info.get("requests_served", 0)
+        uptime = int(time.time() - connected_at) if connected_at else 0
+        nodes.append({
+            "addr": addr,
+            "uptime": uptime,
+            "requests_served": requests_served,
+        })
+    return JSONResponse({"active_clients": len(state.active_clients), "nodes": nodes})
 
 
 @router.get("/api/auth/session")

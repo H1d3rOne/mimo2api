@@ -21,6 +21,8 @@ class GatewayState:
         self.metrics_history_last_snapshot: Dict[str, Any] | None = None
         self.metrics: Dict[str, Any] = self._default_metrics()
         self.recent_errors: deque = deque(maxlen=500)
+        # 节点桥接状态: id(ws) -> {"addr": str, "connected_at": float, "requests_served": int}
+        self.node_info: Dict[int, Dict[str, Any]] = {}
 
     @staticmethod
     def _default_metrics() -> Dict[str, Any]:
