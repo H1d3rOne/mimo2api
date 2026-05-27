@@ -626,14 +626,7 @@
                         </span>
                     </td>
                     <td>
-                        <div style="position: relative; display: inline-block;">
-                            <button class="btn" onclick="toggleMenu(event, '${u.userId}')" style="padding: 4px 10px; font-size: 16px; line-height: 1;">&#8230;</button>
-                            <div id="menu-${u.userId}" class="action-menu" style="display:none; position:fixed; z-index:1000; background:white; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); min-width:120px; overflow:hidden;">
-                                <div onclick="destroyInstance('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#F59E0B; border-bottom:1px solid #f0f0f0;" onmouseover="this.style.background='#FFFBEB'" onmouseout="this.style.background='white'">销毁实例</div>
-                                <div onclick="rebuildInstance('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#3B82F6; border-bottom:1px solid #f0f0f0;" onmouseover="this.style.background='#EFF6FF'" onmouseout="this.style.background='white'">重建实例</div>
-                                <div onclick="deleteUser('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#EF4444;" onmouseover="this.style.background='#FEF2F2'" onmouseout="this.style.background='white'">删除账号</div>
-                            </div>
-                        </div>
+                        <button class="btn" onclick="toggleMenu(event, '${u.userId}')" style="padding: 4px 10px; font-size: 16px; line-height: 1;">&#8230;</button>
                     </td>
                 </tr>`;
             }).join('');
@@ -758,48 +751,63 @@
             }
         }
 
+        let _activeMenu = null;
+
         function toggleMenu(event, userId) {
             event.stopPropagation();
-            const menu = document.getElementById(`menu-${userId}`);
-            const btn = event.currentTarget;
+            // 关闭已有菜单
+            if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }
 
-            // 关闭所有其他菜单
-            document.querySelectorAll('.action-menu').forEach(m => {
-                if (m !== menu) m.style.display = 'none';
+            const btn = event.currentTarget;
+            const rect = btn.getBoundingClientRect();
+
+            const menu = document.createElement('div');
+            menu.className = 'action-menu';
+            menu.style.cssText = 'position:fixed; z-index:10000; background:white; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); min-width:120px; overflow:hidden;';
+
+            const items = [
+                { label: '销毁实例', color: '#F59E0B', hover: '#FFFBEB', action: () => destroyInstance(userId) },
+                { label: '重建实例', color: '#3B82F6', hover: '#EFF6FF', action: () => rebuildInstance(userId) },
+                { label: '删除账号', color: '#EF4444', hover: '#FEF2F2', action: () => deleteUser(userId) },
+            ];
+
+            items.forEach((item, i) => {
+                const div = document.createElement('div');
+                div.textContent = item.label;
+                div.style.cssText = `padding:10px 16px; cursor:pointer; font-size:13px; color:${item.color};${i < items.length - 1 ? 'border-bottom:1px solid #f0f0f0;' : ''}`;
+                div.onmouseover = () => div.style.background = item.hover;
+                div.onmouseout = () => div.style.background = 'white';
+                div.onclick = () => { menu.remove(); _activeMenu = null; item.action(); };
+                menu.appendChild(div);
             });
 
-            if (menu.style.display === 'none') {
-                const rect = btn.getBoundingClientRect();
-                const menuHeight = 120; // 大约高度
-                const spaceBelow = window.innerHeight - rect.bottom;
-                const spaceAbove = rect.top;
+            document.body.appendChild(menu);
 
-                // 计算水平位置：右对齐按钮
-                let left = rect.right - 120;
-                if (left < 8) left = 8;
-
-                // 如果下方空间不足，向上弹出
-                if (spaceBelow < menuHeight && spaceAbove > menuHeight) {
-                    menu.style.top = (rect.top - menuHeight) + 'px';
-                } else {
-                    menu.style.top = rect.bottom + 'px';
-                }
-                menu.style.left = left + 'px';
-                menu.style.display = 'block';
+            // 计算位置：先渲染获取实际高度
+            const menuHeight = menu.offsetHeight;
+            const menuWidth = menu.offsetWidth;
+            let left = rect.right - menuWidth;
+            if (left < 8) left = 8;
+            const spaceBelow = window.innerHeight - rect.bottom;
+            if (spaceBelow < menuHeight && rect.top > menuHeight) {
+                menu.style.top = (rect.top - menuHeight - 4) + 'px';
             } else {
-                menu.style.display = 'none';
+                menu.style.top = (rect.bottom + 4) + 'px';
             }
+            menu.style.left = left + 'px';
+            _activeMenu = menu;
         }
 
         // 点击页面其他区域关闭菜单
         document.addEventListener('click', (e) => {
-            if (!e.target.closest('.action-menu') && !e.target.closest('button[onclick*="toggleMenu"]')) {
-                document.querySelectorAll('.action-menu').forEach(m => m.style.display = 'none');
+            if (_activeMenu && !_activeMenu.contains(e.target)) {
+                _activeMenu.remove();
+                _activeMenu = null;
             }
         });
 
         async function destroyInstance(userId) {
-            document.getElementById(`menu-${userId}`).style.display = 'none';
+            if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }
             if (!confirm(`确定要销毁账号 ${userId} 的实例吗？`)) return;
             try {
                 const res = await apiFetch(`/api/users/destroy/${userId}`, { method: 'POST' });
@@ -816,7 +824,7 @@
         }
 
         async function rebuildInstance(userId) {
-            document.getElementById(`menu-${userId}`).style.display = 'none';
+            if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }
             if (!confirm(`确定要重建账号 ${userId} 的实例吗？将先销毁再重新创建。`)) return;
             try {
                 const res = await apiFetch(`/api/users/rebuild/${userId}`, { method: 'POST' });
