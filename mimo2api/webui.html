@@ -574,9 +574,25 @@
                 return;
             }
 
-            tbody.innerHTML = lastUsersData.map(u => {
-                // 匹配桥接节点：通过 userId 关联
-                const matchedNode = bridgeNodes.find(n => n.user_id === u.userId);
+            // 构建按 user_id 索引的节点映射
+            const nodesByUserId = {};
+            const unassignedNodes = [];
+            bridgeNodes.forEach(n => {
+                if (n.user_id) {
+                    nodesByUserId[n.user_id] = n;
+                } else {
+                    unassignedNodes.push(n);
+                }
+            });
+
+            tbody.innerHTML = lastUsersData.map((u, idx) => {
+                // 匹配桥接节点：通过 userId 关联，未匹配则尝试分配未关联节点
+                let matchedNode = nodesByUserId[u.userId];
+                if (!matchedNode && unassignedNodes.length > 0) {
+                    // 降级：将未关联的节点按顺序分配给没有匹配到节点的账号
+                    matchedNode = unassignedNodes.shift();
+                }
+
                 let bridgeHtml;
                 if (matchedNode) {
                     const uptimeMin = Math.floor(matchedNode.uptime / 60);
