@@ -627,11 +627,11 @@
                     </td>
                     <td>
                         <div style="position: relative; display: inline-block;">
-                            <button class="btn" onclick="toggleMenu('${u.userId}')" style="padding: 4px 10px; font-size: 16px; line-height: 1;">&#8230;</button>
-                            <div id="menu-${u.userId}" style="display:none; position:absolute; right:0; top:100%; z-index:100; background:white; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); min-width:120px; overflow:hidden;">
-                                <div onclick="deleteUser('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#EF4444; border-bottom:1px solid #f0f0f0;" onmouseover="this.style.background='#FEF2F2'" onmouseout="this.style.background='white'">删除账号</div>
+                            <button class="btn" onclick="toggleMenu(event, '${u.userId}')" style="padding: 4px 10px; font-size: 16px; line-height: 1;">&#8230;</button>
+                            <div id="menu-${u.userId}" class="action-menu" style="display:none; position:fixed; z-index:1000; background:white; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.15); min-width:120px; overflow:hidden;">
                                 <div onclick="destroyInstance('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#F59E0B; border-bottom:1px solid #f0f0f0;" onmouseover="this.style.background='#FFFBEB'" onmouseout="this.style.background='white'">销毁实例</div>
-                                <div onclick="rebuildInstance('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#3B82F6;" onmouseover="this.style.background='#EFF6FF'" onmouseout="this.style.background='white'">重建实例</div>
+                                <div onclick="rebuildInstance('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#3B82F6; border-bottom:1px solid #f0f0f0;" onmouseover="this.style.background='#EFF6FF'" onmouseout="this.style.background='white'">重建实例</div>
+                                <div onclick="deleteUser('${u.userId}')" style="padding:10px 16px; cursor:pointer; font-size:13px; color:#EF4444;" onmouseover="this.style.background='#FEF2F2'" onmouseout="this.style.background='white'">删除账号</div>
                             </div>
                         </div>
                     </td>
@@ -758,19 +758,43 @@
             }
         }
 
-        function toggleMenu(userId) {
+        function toggleMenu(event, userId) {
+            event.stopPropagation();
             const menu = document.getElementById(`menu-${userId}`);
+            const btn = event.currentTarget;
+
             // 关闭所有其他菜单
-            document.querySelectorAll('[id^="menu-"]').forEach(m => {
+            document.querySelectorAll('.action-menu').forEach(m => {
                 if (m !== menu) m.style.display = 'none';
             });
-            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+
+            if (menu.style.display === 'none') {
+                const rect = btn.getBoundingClientRect();
+                const menuHeight = 120; // 大约高度
+                const spaceBelow = window.innerHeight - rect.bottom;
+                const spaceAbove = rect.top;
+
+                // 计算水平位置：右对齐按钮
+                let left = rect.right - 120;
+                if (left < 8) left = 8;
+
+                // 如果下方空间不足，向上弹出
+                if (spaceBelow < menuHeight && spaceAbove > menuHeight) {
+                    menu.style.top = (rect.top - menuHeight) + 'px';
+                } else {
+                    menu.style.top = rect.bottom + 'px';
+                }
+                menu.style.left = left + 'px';
+                menu.style.display = 'block';
+            } else {
+                menu.style.display = 'none';
+            }
         }
 
         // 点击页面其他区域关闭菜单
         document.addEventListener('click', (e) => {
-            if (!e.target.closest('[id^="menu-"]') && !e.target.closest('button[onclick*="toggleMenu"]')) {
-                document.querySelectorAll('[id^="menu-"]').forEach(m => m.style.display = 'none');
+            if (!e.target.closest('.action-menu') && !e.target.closest('button[onclick*="toggleMenu"]')) {
+                document.querySelectorAll('.action-menu').forEach(m => m.style.display = 'none');
             }
         });
 
