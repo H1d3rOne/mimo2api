@@ -420,10 +420,16 @@
         <div class="glass-card">
             <div class="flex-between">
                 <h2 style="margin: 0; font-size: 18px;">Claw 运行账号管理</h2>
-                <button class="btn" onclick="openModal()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                    导入凭证
-                </button>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn" id="refreshBtn" onclick="refreshAll()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                        刷新
+                    </button>
+                    <button class="btn" onclick="openModal()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        导入凭证
+                    </button>
+                </div>
             </div>
             
             <div class="table-wrapper">
@@ -806,6 +812,18 @@
                 _activeMenu = null;
             }
         });
+
+        async function refreshAll() {
+            const btn = document.getElementById('refreshBtn');
+            btn.disabled = true;
+            btn.style.opacity = '0.6';
+            try {
+                await Promise.all([fetchStatus(), fetchUsers()]);
+            } finally {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+            }
+        }
 
         async function createInstance(userId) {
             if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }
