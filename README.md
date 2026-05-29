@@ -1,4 +1,4 @@
-# mimi3 (mimo2api) - 隧道直转模式
+# mimo2api - 隧道直转模式
 
 小米 AI Studio MIMO 模型 API 网关，通过 WebSocket 隧道转发请求，不做任何格式转换。
 
@@ -21,17 +21,6 @@
 - WebSocket 隧道穿透内网
 - 流式响应支持
 - 多账号负载均衡
-
-## 与 master 分支的区别
-
-| | master | tunnel-direct |
-|---|---|---|
-| WebSocket 隧道 | ✅ | ✅ |
-| Manager 自动管理 Claw | ✅ | ✅ |
-| `/v1/chat/completions` | 直接转发 | 直接转发 |
-| `/anthropic/v1/messages` | 直接转发 | 直接转发 |
-| `/v1/responses` | 格式转换 | **直接转发** |
-| `/v1/audio/speech` | TTS 转换 | **直接转发** |
 
 ## 快速开始
 
