@@ -1,5 +1,7 @@
 # mimo2api - 隧道直转模式
 
+> 基于 [wkeqin/mimi3](https://github.com/wkeqin/mimi3) 的二次开发项目
+
 小米 AI Studio MIMO 模型 API 网关，通过 WebSocket 隧道转发请求，不做任何格式转换。
 
 ## 架构
