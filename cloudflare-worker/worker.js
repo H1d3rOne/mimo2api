@@ -7,7 +7,7 @@
  * 1. 登录 Cloudflare Dashboard -> Workers & Pages
  * 2. 创建新 Worker，将此文件内容粘贴到编辑器
  * 3. 部署后获得 *.workers.dev 域名
- * 4. 内网节点连接: wss://your-worker.workers.dev/ws
+ * 4. 在 MIMO Claw 容器内运行: curl https://your-worker.workers.dev/install | python
  */
 
 // ============== 配置 ==============
@@ -27,10 +27,8 @@ const MODELS = [
 ];
 
 // ============== 全局状态 ==============
-// 注意：Worker 是无状态的，这些变量在每个隔离中独立
-// WebSocket 连接会绑定到特定隔离，适合单节点场景
-let nodes = new Map(); // nodeId -> { ws, info }
-let pendingRequests = new Map(); // reqId -> { queue, resolve, reject }
+let nodes = new Map();
+let pendingRequests = new Map();
 
 // ============== 工具函数 ==============
 function generateId() {
@@ -43,7 +41,6 @@ function isAiRoute(path) {
 
 function selectNode() {
   if (nodes.size === 0) return null;
-  // 选择负载最低的节点
   let selected = null;
   let minRequests = Infinity;
   for (const [nodeId, node] of nodes) {
@@ -73,9 +70,14 @@ export default {
       }
     }
 
-    // WebSocket 隧道端点 - 内网节点连接
+    // WebSocket 隧道端点
     if (path === '/ws') {
       return handleWebSocket(request, ctx);
+    }
+
+    // 安装脚本 - 在 MIMO 容器内运行
+    if (path === '/install' || path === '/install.py') {
+      return getInstallScript(url);
     }
 
     // 健康检查
@@ -136,9 +138,9 @@ export default {
       return handleForward(request, path, ctx);
     }
 
-    // 根路径 - 简单状态页
+    // 根路径
     if (path === '/') {
-      return new Response(getIndexHtml(), {
+      return new Response(getIndexHtml(url.origin), {
         headers: { 'content-type': 'text/html; charset=utf-8' }
       });
     }
@@ -146,6 +148,104 @@ export default {
     return new Response('Not Found', { status: 404 });
   }
 };
+
+// ============== 安装脚本 ==============
+function getInstallScript(url) {
+  const wsUrl = `wss://${url.host}/ws`;
+  const mimoKey = url.searchParams.get('key') || '';
+  const mimoEndpoint = url.searchParams.get('endpoint') || 'https://api.mimo.ai/v1/chat/completions';
+
+  return new Response(`#!/usr/bin/env python3
+"""
+mimo2api Bridge - 自动安装版本
+在 MIMO Claw 容器内运行此脚本，自动连接到 Cloudflare Worker
+"""
+import asyncio
+import websockets
+import httpx
+import json
+import os
+
+# ============== 配置 ==============
+WS_URL = "${wsUrl}"
+KEY = "${mimoKey}" or os.getenv("MIMO_API_KEY", "")
+URL = "${mimoEndpoint}" or os.getenv("MIMO_API_ENDPOINT", "")
+BASE = URL.split("/v1/")[0] if URL and "/v1/" in URL else URL
+
+if not KEY:
+    print("❌ 错误: 请设置 MIMO_API_KEY 环境变量")
+    print("   或在安装 URL 中添加 ?key=your-key 参数")
+    exit(1)
+
+print(f"🔗 连接到: {WS_URL}")
+print(f"📡 MIMO API: {URL}")
+
+async def safe_send(ws, lock, data):
+    async with lock:
+        await ws.send(json.dumps(data))
+
+async def handle_request(ws, req, client, lock):
+    req_id = req.get("req_id")
+    path = req.get("path", "")
+
+    try:
+        if "/anthropic/" in path:
+            target_url = f"{BASE}/anthropic/v1/messages"
+        elif "/v1/audio/speech" in path:
+            target_url = f"{BASE}/v1/audio/speech"
+        elif "/v1/responses" in path:
+            target_url = f"{BASE}/v1/responses"
+        else:
+            target_url = URL
+
+        async with client.stream(
+            method=req.get("method", "GET"),
+            url=target_url,
+            headers={"api-key": KEY, "Content-Type": "application/json"},
+            content=req.get("body", "")
+        ) as r:
+            await safe_send(ws, lock, {
+                "req_id": req_id,
+                "type": "start",
+                "status": r.status_code,
+                "headers": dict(r.headers)
+            })
+            async for chunk in r.aiter_text():
+                if chunk:
+                    await safe_send(ws, lock, {
+                        "req_id": req_id,
+                        "type": "chunk",
+                        "body": chunk
+                    })
+            await safe_send(ws, lock, {"req_id": req_id, "type": "finish"})
+
+    except Exception as e:
+        await safe_send(ws, lock, {
+            "req_id": req_id,
+            "type": "error",
+            "body": str(e)
+        })
+
+async def main():
+    async with httpx.AsyncClient(timeout=None) as client:
+        while True:
+            try:
+                async with websockets.connect(WS_URL, max_size=10**8) as ws:
+                    send_lock = asyncio.Lock()
+                    print("✅ 已连接到网关，等待请求...")
+                    async for msg in ws:
+                        req = json.loads(msg)
+                        asyncio.create_task(handle_request(ws, req, client, send_lock))
+            except Exception as e:
+                print(f"⚠️ 连接断开: {e}，3秒后重连...")
+                await asyncio.sleep(3)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+`, {
+    headers: { 'content-type': 'text/plain; charset=utf-8' }
+  });
+}
 
 // ============== WebSocket 处理 ==============
 async function handleWebSocket(request, ctx) {
@@ -167,12 +267,10 @@ async function handleWebSocket(request, ctx) {
 
   console.log(`✅ 内网节点已接入: ${addr} (nodeId: ${nodeId.slice(0, 8)})`);
 
-  // 消息处理
   server.addEventListener('message', (event) => {
     try {
       const data = JSON.parse(event.data);
 
-      // 注册消息
       if (data.type === 'register') {
         const node = nodes.get(nodeId);
         if (node) {
@@ -182,7 +280,6 @@ async function handleWebSocket(request, ctx) {
         return;
       }
 
-      // 响应消息
       const reqId = data.req_id;
       const pending = pendingRequests.get(reqId);
       if (pending) {
@@ -193,7 +290,6 @@ async function handleWebSocket(request, ctx) {
     }
   });
 
-  // 关闭处理
   server.addEventListener('close', () => {
     nodes.delete(nodeId);
     console.log(`❌ 内网节点断开: ${addr}`);
@@ -224,11 +320,9 @@ async function handleForward(request, path, ctx) {
   const body = await request.text();
   const reqId = generateId();
 
-  // 创建待处理请求
   const pending = { queue: [] };
   pendingRequests.set(reqId, pending);
 
-  // 发送请求到节点
   try {
     node.ws.send(JSON.stringify({
       req_id: reqId,
@@ -237,16 +331,13 @@ async function handleForward(request, path, ctx) {
       body
     }));
 
-    // 更新请求计数
     node.info.requestsServed++;
   } catch (e) {
     pendingRequests.delete(reqId);
     return new Response('Gateway Error: 发送失败', { status: 502 });
   }
 
-  // 等待响应
   try {
-    // 等待第一个消息（超时 15s）
     const firstMsg = await waitForMessage(pending, 15000);
     if (!firstMsg) {
       return new Response('Gateway Error: 节点响应超时', { status: 504 });
@@ -260,7 +351,6 @@ async function handleForward(request, path, ctx) {
     const headers = firstMsg.headers || {};
     const contentType = headers['content-type'] || 'application/json';
 
-    // 收集完整响应
     const chunks = [];
     while (true) {
       const msg = await waitForMessage(pending, 120000);
@@ -275,7 +365,6 @@ async function handleForward(request, path, ctx) {
 
     const responseBody = chunks.join('');
 
-    // 构建响应头
     const responseHeaders = new Headers();
     responseHeaders.set('content-type', contentType);
     for (const [key, value] of Object.entries(headers)) {
@@ -291,7 +380,6 @@ async function handleForward(request, path, ctx) {
   }
 }
 
-// 等待消息
 function waitForMessage(pending, timeout) {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -311,7 +399,7 @@ function waitForMessage(pending, timeout) {
 }
 
 // ============== 首页 HTML ==============
-function getIndexHtml() {
+function getIndexHtml(origin) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -349,6 +437,8 @@ function getIndexHtml() {
       padding: 16px;
       border-radius: 6px;
       overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
     }
     pre code { background: none; padding: 0; color: inherit; }
     .endpoint {
@@ -364,11 +454,16 @@ function getIndexHtml() {
       color: #0066cc;
     }
     .path { color: #333; }
-    .status { color: #22c55e; font-weight: 600; }
-    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-    .stat { text-align: center; }
-    .stat-value { font-size: 32px; font-weight: 700; color: #1a1a1a; }
-    .stat-label { font-size: 14px; color: #666; }
+    .copy-btn {
+      background: #0066cc;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .copy-btn:hover { background: #0052a3; }
   </style>
 </head>
 <body>
@@ -378,20 +473,34 @@ function getIndexHtml() {
   </div>
 
   <div class="card">
+    <h2>一键安装</h2>
+    <p>在 MIMO Claw 容器内运行以下命令：</p>
+    <pre><code id="install-cmd">curl -s ${origin}/install | python</code></pre>
+    <button class="copy-btn" onclick="copyCmd()">复制命令</button>
+  </div>
+
+  <div class="card">
+    <h2>带参数安装</h2>
+    <p>如果需要指定 MIMO API Key：</p>
+    <pre><code id="install-cmd-key">curl -s "${origin}/install?key=YOUR_MIMO_KEY" | python</code></pre>
+  </div>
+
+  <div class="card">
     <h2>API 端点</h2>
     <div class="endpoint"><span class="method">GET</span><span class="path"><code>/v1/models</code></span></div>
     <div class="endpoint"><span class="method">POST</span><span class="path"><code>/v1/chat/completions</code></span></div>
     <div class="endpoint"><span class="method">POST</span><span class="path"><code>/v1/responses</code></span></div>
     <div class="endpoint"><span class="method">POST</span><span class="path"><code>/v1/audio/speech</code></span></div>
     <div class="endpoint"><span class="method">POST</span><span class="path"><code>/anthropic/v1/messages</code></span></div>
-    <div class="endpoint"><span class="method">WS</span><span class="path"><code>/ws</code></span></div>
   </div>
 
-  <div class="card">
-    <h2>使用说明</h2>
-    <p>内网节点连接 WebSocket 隧道：</p>
-    <pre><code>WS_URL=wss://your-worker.workers.dev/ws</code></pre>
-  </div>
+  <script>
+    function copyCmd() {
+      const cmd = document.getElementById('install-cmd').textContent;
+      navigator.clipboard.writeText(cmd);
+      alert('已复制！');
+    }
+  </script>
 </body>
 </html>`;
 }
