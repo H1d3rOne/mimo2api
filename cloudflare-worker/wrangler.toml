@@ -1,0 +1,19 @@
+{
+  "name": "mimo2api-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-01-01",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GATEWAY_STATE",
+        "class_name": "GatewayState"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["GatewayState"]
+    }
+  ]
+}
