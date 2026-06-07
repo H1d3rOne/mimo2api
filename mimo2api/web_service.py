@@ -1,9 +1,10 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TextIO
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
@@ -23,6 +24,12 @@ except ImportError:
     msvcrt = None
 
 MODEL_MAPPING_FILE = Path(__file__).parent.parent / "model_mapping.json"
+ENDPOINT_CONVERSION_FILE = Path(
+    os.getenv(
+        "MIMO_ENDPOINT_CONVERSION_FILE",
+        str(Path(__file__).parent.parent / "endpoint_conversion.json"),
+    )
+)
 
 from .manager import start_manager_tasks, trigger_rebuild
 from .auth import (
@@ -46,6 +53,11 @@ from .metrics_store import (
     record_attempt_started,
     record_request_finished,
     record_request_started,
+)
+from .responses_converter import (
+    ResponsesStreamConverter,
+    convert_request as convert_responses_request_to_chat,
+    convert_response as convert_chat_response_to_responses,
 )
 
 # 配置基础日志
@@ -298,6 +310,8 @@ def release_single_process_lock() -> None:
 class RetryState:
     status_code: int = 502
     response_text: str = DEFAULT_GATEWAY_ERROR
+    failed_ws_ids: set[int] = field(default_factory=set)
+    failed_user_ids: set[str] = field(default_factory=set)
 
 @dataclass(slots=True)
 class ForwardAttempt:
@@ -356,6 +370,39 @@ def apply_model_mapping(body_text: str) -> str:
         return json.dumps(data, ensure_ascii=False)
     return body_text
 
+
+def _truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def load_endpoint_conversion_config() -> dict[str, bool]:
+    """读取 /v1/responses -> /v1/chat/completions 端点转换开关。
+
+    行为对齐 Cloudflare Worker 版：持久化配置优先；未写入配置文件时，
+    回退到环境变量 MIMO_ENDPOINT_CONVERSION_ENABLED。
+    """
+    if ENDPOINT_CONVERSION_FILE.exists():
+        try:
+            data = json.loads(ENDPOINT_CONVERSION_FILE.read_text("utf-8"))
+            if isinstance(data, dict):
+                value = data.get("enabled")
+                return {"enabled": value is True or _truthy(str(value) if value is not None else None)}
+            if isinstance(data, bool):
+                return {"enabled": data}
+        except (json.JSONDecodeError, OSError):
+            logger.warning(f"读取端点转换配置失败，将回退环境变量: {ENDPOINT_CONVERSION_FILE}")
+    return {"enabled": _truthy(os.getenv("MIMO_ENDPOINT_CONVERSION_ENABLED"))}
+
+
+def save_endpoint_conversion_enabled(enabled: bool) -> None:
+    ENDPOINT_CONVERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ENDPOINT_CONVERSION_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"enabled": bool(enabled)}, ensure_ascii=False, indent=2), "utf-8")
+    tmp.rename(ENDPOINT_CONVERSION_FILE)
+
+
 @app.get("/api/model_mapping")
 async def api_get_model_mapping():
     return JSONResponse(content=load_model_mapping())
@@ -381,6 +428,22 @@ async def api_delete_model_mapping(model_name: str):
         return JSONResponse({"ok": True, "deleted": model_name})
     return JSONResponse({"error": f"模型 {model_name} 不在映射中"}, status_code=404)
 
+
+@app.get("/api/endpoint_conversion")
+async def api_get_endpoint_conversion():
+    return JSONResponse(content=load_endpoint_conversion_config())
+
+
+@app.put("/api/endpoint_conversion")
+async def api_put_endpoint_conversion(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "请求体不是合法 JSON"}, status_code=400)
+    enabled = isinstance(body, dict) and body.get("enabled") is True
+    save_endpoint_conversion_enabled(enabled)
+    return JSONResponse(content=load_endpoint_conversion_config())
+
 @app.websocket("/ws")
 async def ws_tunnel(ws: WebSocket):
     await ws.accept()
@@ -396,10 +459,17 @@ async def ws_tunnel(ws: WebSocket):
             data = json.loads(msg)
             # 处理注册消息
             if data.get("type") == "register":
-                user_id = data.get("user_id", "")
+                user_id = str(data.get("user_id", "") or "")
                 if user_id:
+                    # 同一账号只保留最新 bridge，避免旧容器残留/重复节点误判在线。
+                    duplicate_nodes = [
+                        old_ws for old_ws in list(state.active_clients)
+                        if old_ws is not ws and str(state.node_info.get(id(old_ws), {}).get("user_id") or "") == user_id
+                    ]
                     state.node_info[id(ws)]["user_id"] = user_id
                     logger.info(f"📋 节点 {client_addr} 注册为用户 {user_id}")
+                    for old_ws in duplicate_nodes:
+                        quarantine_client(old_ws, f"同账号 {user_id} 新 bridge 已接入", seconds=24 * 60 * 60)
                 continue
             req_id = data.get("req_id")
             if req_id and req_id in state.pending_queues:
@@ -434,12 +504,28 @@ async def ws_tunnel(ws: WebSocket):
         logger.info(f"当前在线节点数: {len(state.active_clients)}")
 
 
-def get_next_client() -> WebSocket | None:
+def get_next_client(
+    *,
+    exclude_ws_ids: set[int] | None = None,
+    exclude_user_ids: set[str] | None = None,
+) -> WebSocket | None:
     if not state.active_clients:
         return None
     now = time.time()
+    exclude_ws_ids = exclude_ws_ids or set()
+    exclude_user_ids = exclude_user_ids or set()
     available_clients: list[WebSocket] = []
     for client in state.active_clients:
+        info = state.node_info.get(id(client), {})
+        user_id = str(info.get("user_id") or "")
+        if not user_id:
+            continue
+        if info.get("disabled"):
+            continue
+        if id(client) in exclude_ws_ids:
+            continue
+        if user_id in exclude_user_ids:
+            continue
         if state.client_cooldowns.get(id(client), 0) <= now:
             available_clients.append(client)
     if not available_clients:
@@ -452,7 +538,13 @@ def get_next_client() -> WebSocket | None:
 
 def get_available_client_count() -> int:
     now = time.time()
-    return sum(1 for c in state.active_clients if state.client_cooldowns.get(id(c), 0) <= now)
+    return sum(
+        1
+        for c in state.active_clients
+        if state.node_info.get(id(c), {}).get("user_id")
+        and not state.node_info.get(id(c), {}).get("disabled")
+        and state.client_cooldowns.get(id(c), 0) <= now
+    )
 
 
 def touch_pending_request(req_id: str) -> None:
@@ -490,6 +582,54 @@ def cooldown_client(ws: WebSocket, seconds: int, reason: str) -> None:
         f"冷却结束时间戳: {int(cooldown_until)}"
     )
 
+
+def quarantine_client(ws: WebSocket, reason: str, seconds: int = 60 * 60) -> None:
+    """将节点标记为不可调度，但不关闭 WS。
+
+    bridge.py 断线会自动重连；如果服务端直接关闭重复/失效节点，
+    容器内旧 bridge 会形成重连风暴。对重复节点和 401/403 节点，
+    更稳妥的处理是保留连接但禁用调度。
+    """
+    info = state.node_info.setdefault(id(ws), {})
+    info["disabled"] = True
+    info["disabled_reason"] = reason
+    cooldown_client(ws, seconds, reason)
+
+
+async def retire_client(ws: WebSocket, reason: str) -> None:
+    """移除失效 bridge 节点。
+
+    401 通常表示容器内 MIMO_API_KEY 已失效或该连接来自旧容器残留。
+    这类节点继续保留只会污染后续调度，因此直接从可用池移除并关闭 WS。
+    """
+    label = node_label(ws)
+    if ws in state.active_clients:
+        state.active_clients.remove(ws)
+    state.client_cooldowns.pop(id(ws), None)
+    state.node_info.pop(id(ws), None)
+
+    orphan_ids = state.ws_to_req_ids.pop(id(ws), set())
+    for orphan_id in orphan_ids:
+        q = state.pending_queues.pop(orphan_id, None)
+        state.req_id_to_ws_id.pop(orphan_id, None)
+        state.req_id_timestamps.pop(orphan_id, None)
+        if q is not None:
+            try:
+                q.put_nowait({"type": "error", "body": f"节点已移除: {reason}"})
+            except asyncio.QueueFull:
+                pass
+
+    if state.current_client_index >= len(state.active_clients):
+        state.current_client_index = 0
+
+    try:
+        await ws.close()
+    except Exception:
+        pass
+
+    logger.warning(f"🧹 已移除失效节点 {label}: {reason}。当前在线节点数: {len(state.active_clients)}")
+
+
 async def drain_and_close(req_id: str, queue: asyncio.Queue) -> None:
     try:
         while True:
@@ -507,14 +647,17 @@ def should_retry_status(status_code: int) -> bool:
 def build_ws_payload(req_id: str, method: str, path: str, body: str) -> str:
     return json.dumps({"req_id": req_id, "method": method, "path": path, "body": body})
 
-async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str, attempt_number: int) -> ForwardAttempt | None:
+async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str, retry_state: RetryState, attempt_number: int) -> ForwardAttempt | None:
     try:
         req_id, queue = create_pending_request()
     except RuntimeError:
         logger.warning("⚠️ pending queue 已满，拒绝新请求")
         return None
         
-    target_ws = get_next_client()
+    target_ws = get_next_client(
+        exclude_ws_ids=retry_state.failed_ws_ids,
+        exclude_user_ids=retry_state.failed_user_ids,
+    )
     if not target_ws:
         cleanup_pending_request(req_id)
         return None
@@ -561,7 +704,7 @@ async def dispatch_to_node(*, method: str, path: str, body: str, log_label: str,
 
 
 async def prepare_forward_attempt(*, method: str, path: str, body: str, log_label: str, retry_state: RetryState, attempt_number: int) -> ForwardAttempt | None:
-    attempt = await dispatch_to_node(method=method, path=path, body=body, log_label=log_label, attempt_number=attempt_number)
+    attempt = await dispatch_to_node(method=method, path=path, body=body, log_label=log_label, retry_state=retry_state, attempt_number=attempt_number)
     if attempt is None:
         return None
 
@@ -574,13 +717,36 @@ async def prepare_forward_attempt(*, method: str, path: str, body: str, log_labe
         return None
 
     status_code = first_msg.get("status", 200)
+    failed_user_id = str(state.node_info.get(id(attempt.target_ws), {}).get("user_id") or "")
     if status_code == 401:
-        cooldown_client(attempt.target_ws, NODE_401_COOLDOWN_SECONDS, "401 Unauthorized")
         retry_state.status_code = 401
-        retry_state.response_text = "Gateway Error: 节点鉴权失败 (401)，已临时跳过该节点"
+        retry_state.response_text = "Gateway Error: 节点鉴权失败 (401)，已移除失效节点并切换其他账号"
+        retry_state.failed_ws_ids.add(id(attempt.target_ws))
+        if failed_user_id:
+            retry_state.failed_user_ids.add(failed_user_id)
+        quarantine_client(attempt.target_ws, "401 Unauthorized", seconds=24 * 60 * 60)
+    elif status_code == 403:
+        retry_state.status_code = 403
+        retry_state.response_text = "Gateway Error: 节点无访问权限 (403)，已移除失效节点并切换其他账号"
+        retry_state.failed_ws_ids.add(id(attempt.target_ws))
+        if failed_user_id:
+            retry_state.failed_user_ids.add(failed_user_id)
+        quarantine_client(attempt.target_ws, "403 Forbidden", seconds=24 * 60 * 60)
+    elif status_code == 429:
+        retry_state.status_code = 429
+        retry_state.response_text = "Gateway Error: 节点限流 (429)，已临时跳过并切换其他账号"
+        retry_state.failed_ws_ids.add(id(attempt.target_ws))
+        if failed_user_id:
+            retry_state.failed_user_ids.add(failed_user_id)
+        cooldown_client(attempt.target_ws, 60, "429 Rate Limited")
+    elif status_code >= 500:
+        retry_state.status_code = status_code
+        retry_state.response_text = f"Gateway Error: 节点上游错误 ({status_code})，已临时跳过并切换其他账号"
+        retry_state.failed_ws_ids.add(id(attempt.target_ws))
+        cooldown_client(attempt.target_ws, 30, f"HTTP {status_code}")
 
     if should_retry_status(status_code):
-        logger.warning(f"⚠️ {log_label} 节点返回状态码 {status_code}，触发自动重试 (当前 attempt={attempt_number})...")
+        logger.warning(f"⚠️ {log_label} 节点返回状态码 {status_code}，触发自动切换账号/节点重试 (当前 attempt={attempt_number})...")
         retry_state.status_code = status_code
         _track_task(asyncio.create_task(drain_and_close(attempt.req_id, attempt.queue)))
         return None
@@ -610,6 +776,21 @@ async def collect_response_body(current_req_id: str, current_queue: asyncio.Queu
     finally:
         cleanup_pending_request(current_req_id)
     return "".join(chunks)
+
+
+SSE_EVENT_SEPARATOR_RE = re.compile(r"\r?\n\r?\n")
+
+
+def pop_complete_sse_events(buffer: str) -> tuple[list[str], str]:
+    events: list[str] = []
+    while True:
+        match = SSE_EVENT_SEPARATOR_RE.search(buffer)
+        if not match:
+            break
+        events.append(buffer[:match.start()])
+        buffer = buffer[match.end():]
+    return events, buffer
+
 
 # -------------- API 路由定义 --------------
 
@@ -748,7 +929,34 @@ async def _forward_request(request: Request, path: str):
 
     retry_state = RetryState()
     body_text = body.decode("utf-8", "ignore").lstrip("\ufeff")
+    forward_path = path
+    convert_to_responses = False
+    response_model_fallback = ""
+
+    if path == "/v1/responses" and load_endpoint_conversion_config().get("enabled"):
+        try:
+            parsed_body = json.loads(body_text or "{}")
+            if not isinstance(parsed_body, dict):
+                raise ValueError("request body must be a JSON object")
+        except (json.JSONDecodeError, ValueError):
+            return JSONResponse(
+                {"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+        chat_body = convert_responses_request_to_chat(parsed_body)
+        forward_path = "/v1/chat/completions"
+        body_text = json.dumps(chat_body, ensure_ascii=False)
+        convert_to_responses = True
+        response_model_fallback = str(chat_body.get("model") or parsed_body.get("model") or "")
+
     body_text = apply_model_mapping(body_text)
+    if convert_to_responses:
+        try:
+            mapped_body = json.loads(body_text)
+            if isinstance(mapped_body, dict):
+                response_model_fallback = str(mapped_body.get("model") or response_model_fallback or "")
+        except (json.JSONDecodeError, AttributeError):
+            pass
     route_key = path
     request_started_at = time.monotonic()
 
@@ -762,7 +970,7 @@ async def _forward_request(request: Request, path: str):
     for attempt in range(max_retries):
         req_id = "unknown"
         try:
-            prepared = await prepare_forward_attempt(method=method, path=path, body=body_text, log_label="转发请求", retry_state=retry_state, attempt_number=attempt + 1)
+            prepared = await prepare_forward_attempt(method=method, path=forward_path, body=body_text, log_label="转发请求", retry_state=retry_state, attempt_number=attempt + 1)
             if prepared is None:
                 continue
             req_id = prepared.req_id
@@ -772,12 +980,24 @@ async def _forward_request(request: Request, path: str):
             first_byte_at = time.monotonic()
             content_type, response_headers = normalize_response_headers(first_msg.get("headers", {}))
 
-            async def stream_generator(current_req_id, current_queue, use_keepalive):
+            if convert_to_responses and status_code < 400 and "text/event-stream" not in content_type.lower():
+                raw_body = await collect_response_body(req_id, queue)
+                try:
+                    converted = convert_chat_response_to_responses(json.loads(raw_body), response_model_fallback)
+                    record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=True)
+                    return JSONResponse(content=converted, status_code=status_code, headers=response_headers)
+                except Exception:
+                    record_request_finished(route_key=route_key, status_code=status_code, started_at=request_started_at, first_byte_at=first_byte_at, success=status_code < 400)
+                    return Response(raw_body, status_code=status_code, media_type=content_type, headers=response_headers)
+
+            async def stream_generator(current_req_id, current_queue, use_keepalive, convert_stream_to_responses=False, model_fallback=""):
                 last_data_time = time.monotonic()
                 data_task = asyncio.ensure_future(current_queue.get())
                 keepalive_task = None
                 stream_succeeded = False
                 usage_data = None
+                converter = ResponsesStreamConverter(model_fallback) if convert_stream_to_responses else None
+                sse_buffer = ""
 
                 async def _do_keepalive():
                     await asyncio.sleep(STREAM_KEEPALIVE_INTERVAL)
@@ -811,8 +1031,21 @@ async def _forward_request(request: Request, path: str):
                             chunk_body = msg.get("body", "")
                             if usage_data is None:
                                 usage_data = extract_usage_from_sse_chunk(chunk_body)
-                            yield chunk_body.encode("utf-8")
+                            if converter is None:
+                                yield chunk_body.encode("utf-8")
+                            else:
+                                sse_buffer += chunk_body
+                                events, sse_buffer = pop_complete_sse_events(sse_buffer)
+                                for raw_event in events:
+                                    for converted_event in converter.process_sse(raw_event):
+                                        yield converted_event.encode("utf-8")
                 finally:
+                    if converter is not None and stream_succeeded:
+                        if sse_buffer.strip():
+                            for converted_event in converter.process_sse(sse_buffer):
+                                yield converted_event.encode("utf-8")
+                        for converted_event in converter.finalize():
+                            yield converted_event.encode("utf-8")
                     data_task.cancel()
                     if keepalive_task is not None:
                         keepalive_task.cancel()
@@ -823,7 +1056,19 @@ async def _forward_request(request: Request, path: str):
             if status_code >= 400:
                 record_error(route_key, status_code, f"上游返回 {status_code}", detail=first_msg.get("body", "")[:300])
 
-            return StreamingResponse(stream_generator(req_id, queue, use_keepalive=is_streaming), status_code=status_code, media_type=content_type, headers=response_headers)
+            response_media_type = "text/event-stream; charset=utf-8" if convert_to_responses and status_code < 400 else content_type
+            return StreamingResponse(
+                stream_generator(
+                    req_id,
+                    queue,
+                    use_keepalive=is_streaming,
+                    convert_stream_to_responses=convert_to_responses and status_code < 400,
+                    model_fallback=response_model_fallback,
+                ),
+                status_code=status_code,
+                media_type=response_media_type,
+                headers=response_headers,
+            )
 
         except asyncio.TimeoutError:
             retry_state.status_code = 504

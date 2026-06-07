@@ -80,7 +80,7 @@ def _extract_message_content(content: Any) -> Union[str, list[dict[str, Any]]]:
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
-        return str(content)
+        return "" if content is None else str(content)
 
     parts: list[dict[str, Any]] = []
     for part in content:
@@ -123,6 +123,11 @@ def _merge_reasoning_content(current: Optional[str], new: Optional[str]) -> Opti
     return f"{current}{new}"
 
 
+def _normalize_role(role: Any) -> str:
+    value = str(role or "user")
+    return value if value in {"system", "user", "assistant", "developer"} else "user"
+
+
 def _extract_reasoning_content(item: RespReasoningItem) -> str:
     return item.reasoning_content or item.encrypted_content or ""
 
@@ -134,10 +139,7 @@ def _parse_response_input_item(raw_item: Any) -> RespItem | None:
 
     item_type = raw_item.get("type")
     if not item_type and ("role" in raw_item or "content" in raw_item):
-        role = raw_item.get("role") or "user"
-        if role not in {"system", "user", "assistant", "developer"}:
-            role = "user"
-        return RespMessageItem(role=role, content=raw_item.get("content", []))
+        return RespMessageItem(role=_normalize_role(raw_item.get("role")), content=raw_item.get("content", []))
 
     if item_type == "reasoning":
         item = dict(raw_item)
@@ -151,6 +153,7 @@ def _parse_response_input_item(raw_item: Any) -> RespItem | None:
         item = dict(raw_item)
         if item.get("content") is None:
             item["content"] = []
+        item["role"] = _normalize_role(item.get("role"))
         return RespMessageItem.model_validate(item)
 
     if item_type == "function_call":
@@ -163,7 +166,7 @@ def _parse_response_input_item(raw_item: Any) -> RespItem | None:
     if item_type == "function_call_output":
         item = dict(raw_item)
         item["call_id"] = item.get("call_id") or item.get("id") or _generate_id("call")
-        item["output"] = _stringify_tool_payload(item.get("output"))
+        item["output"] = _stringify_tool_payload(item.get("output", item.get("content")))
         return RespFunctionOutputItem.model_validate(item)
 
     if item_type == "custom_tool_call":
@@ -182,6 +185,36 @@ def _parse_response_input_item(raw_item: Any) -> RespItem | None:
         )
 
     return None
+
+
+def _convert_responses_tools_to_chat(tools: Any) -> Any:
+    if not isinstance(tools, list):
+        return tools
+
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        if isinstance(tool.get("function"), dict):
+            converted.append({"type": "function", "function": tool["function"]})
+            continue
+        converted.append({
+            "type": "function",
+            "function": {
+                "name": tool.get("name") or "function_call",
+                "description": tool.get("description") or "",
+                "parameters": tool.get("parameters") or {},
+            },
+        })
+    return converted
+
+
+def _convert_responses_tool_choice_to_chat(tool_choice: Any) -> Any:
+    if not isinstance(tool_choice, dict):
+        return tool_choice
+    if tool_choice.get("type") == "function" and tool_choice.get("name") and "function" not in tool_choice:
+        return {"type": "function", "function": {"name": tool_choice["name"]}}
+    return tool_choice
 
 
 def convert_request(req: dict[str, Any]) -> dict[str, Any]:
@@ -247,12 +280,28 @@ def convert_request(req: dict[str, Any]) -> dict[str, Any]:
         req["max_tokens"] = req.pop("max_output_tokens")
 
     # 移除 Responses API 专有字段，避免污染 Chat Completions 请求
-    for key in ("instructions", "input", "store", "previous_response_id"):
+    for key in (
+        "instructions",
+        "input",
+        "store",
+        "previous_response_id",
+        "background",
+        "include",
+        "prompt",
+        "reasoning",
+        "text",
+        "truncation",
+    ):
         req.pop(key, None)
 
     if "tools" in req:
-        req["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t.get(
-            "description", ""), "parameters": t.get("parameters", {})}} for t in req["tools"] if t.get("type") == "function"]
+        req["tools"] = _convert_responses_tools_to_chat(req["tools"])
+
+    if "tool_choice" in req:
+        req["tool_choice"] = _convert_responses_tool_choice_to_chat(req["tool_choice"])
+
+    if "stream" not in req:
+        req["stream"] = False
 
     req_kwargs = {**req, "messages": chat_messages}
     chat_req = ChatRequest(**req_kwargs)
@@ -278,7 +327,7 @@ class ResponsesAPIResponse(BaseModel):
     status: str = "completed"
 
 
-def convert_response(chat_resp: dict[str, Any]) -> dict[str, Any]:
+def convert_response(chat_resp: dict[str, Any], model_fallback: str = "") -> dict[str, Any]:
     """将 Chat Completions 响应转换为 Responses API 响应。"""
     choice = (chat_resp.get("choices") or [{}])[0]
     message = choice.get("message", {})
@@ -321,7 +370,7 @@ def convert_response(chat_resp: dict[str, Any]) -> dict[str, Any]:
     ) if chat_usage else None
 
     resp = ResponsesAPIResponse(
-        model=chat_resp.get("model", ""),
+        model=chat_resp.get("model") or model_fallback or "",
         output=output_items,
         usage=usage
     )
@@ -380,14 +429,24 @@ class ResponsesStreamConverter:
         )
 
     def process_chunk(self, chunk_text: str) -> list[str]:
-        return list(self._process_chunk_iter(chunk_text))
+        """兼容旧调用名：入参应是一段完整 SSE event 文本。"""
+        return self.process_sse(chunk_text)
 
-    def _process_chunk_iter(self, chunk_text: str) -> Iterator[str]:
-        chunk_text = chunk_text.strip()
-        if not chunk_text or not chunk_text.startswith("data:"):
+    def process_sse(self, raw_event: str) -> list[str]:
+        return list(self._process_sse_iter(raw_event))
+
+    def _process_sse_iter(self, raw_event: str) -> Iterator[str]:
+        data_lines = [
+            line[5:].strip()
+            for line in raw_event.splitlines()
+            if line.startswith("data:")
+        ]
+        if not data_lines:
             return
 
-        data_str = chunk_text.split(":", 1)[1].strip()
+        data_str = "\n".join(data_lines).strip()
+        if not data_str:
+            return
         if data_str == "[DONE]":
             yield from self._handle_done()
             return
@@ -396,6 +455,9 @@ class ResponsesStreamConverter:
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
             return
+
+        if chunk.get("model") and not self._model:
+            self._model = str(chunk["model"])
 
         if usage_data := chunk.get("usage"):
             self._usage = ResponseUsage(
@@ -417,13 +479,13 @@ class ResponsesStreamConverter:
 
         if reasoning_content := delta.get("reasoning_content"):
             yield from self._ensure_reasoning_item_started()
-            self._reasoning_buf += reasoning_content
+            self._reasoning_buf += str(reasoning_content)
 
         if content := delta.get("content"):
             yield from self._close_reasoning_item()
             yield from self._ensure_text_item_started()
-            self._text_buf += content
-            yield _sse_event("response.output_text.delta", {"output_index": self._text_out_idx, "content_index": 0, "delta": content})
+            self._text_buf += str(content)
+            yield _sse_event("response.output_text.delta", {"output_index": self._text_out_idx, "content_index": 0, "delta": str(content)})
 
         for tc in (delta.get("tool_calls") or []):
             yield from self._close_reasoning_item()
@@ -438,7 +500,7 @@ class ResponsesStreamConverter:
             yield from self._emit_response_created()
 
             out_idx = self._allocate_index()
-            call_id = tc.get("id", "")
+            call_id = tc.get("id") or _generate_id("call")
 
             # 使用模型来生成结构，确保规范
             item_model = RespFunctionCallItem(call_id=call_id, name="")
@@ -451,10 +513,10 @@ class ResponsesStreamConverter:
         model: RespFunctionCallItem = tc_data["model"]
 
         if name := func.get("name"):
-            model.name = name
+            model.name = str(name)
         if args := func.get("arguments"):
-            model.arguments += args
-            yield _sse_event("response.function_call_arguments.delta", {"output_index": tc_data["output_index"], "delta": args})
+            model.arguments += str(args)
+            yield _sse_event("response.function_call_arguments.delta", {"output_index": tc_data["output_index"], "delta": str(args)})
 
     def _emit_response_created(self) -> Iterator[str]:
         if not self._response_created_emitted:

@@ -356,7 +356,7 @@
 <body>
     <div id="authShell" class="auth-shell hidden">
         <div class="glass-card">
-            <h1 class="login-title">Mimo2 Center</h1>
+            <h1 class="login-title">Mimo2api</h1>
             <p class="login-copy">这个面板现在需要登录后才能查看和管理节点账号。</p>
             <div class="auth-form">
                 <div>
@@ -374,10 +374,11 @@
 
     <div id="appShell" class="container hidden">
         <div class="header">
-            <h1>Mimo2 Center</h1>
+            <h1>Mimo2api</h1>
             <div class="header-meta">
                 <span id="webAuthBadge" class="badge">WebUI 未鉴权</span>
                 <span id="aiAuthBadge" class="badge warn">AI 端点未鉴权</span>
+                <button id="endpointConversionBtn" class="btn btn-outline" onclick="openEndpointConversionModal()">端点转换：...</button>
                 <button id="logoutBtn" class="btn btn-outline hidden" onclick="logout()">退出登录</button>
             </div>
         </div>
@@ -452,14 +453,47 @@
         </div>
     </div>
 
+    <!-- 端点转换弹窗 -->
+    <div class="modal-overlay" id="endpointConversionModal">
+        <div class="modal">
+            <h3 class="modal-title">端点转换</h3>
+            <div class="form-group">
+                <label class="form-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                    <input id="endpointConversionEnabledInput" type="checkbox" style="width:18px;height:18px;" />
+                    开启 Responses API 转换
+                </label>
+                <div class="form-hint" style="margin-top:10px;line-height:1.7;">
+                    开启后，客户端调用 <code>/v1/responses</code> 时会由网关转换为上游 <code>/v1/chat/completions</code> 请求，
+                    并把 Chat Completions 响应转换回 Responses API 格式，包含 <code>tool_calls</code> / <code>function_call</code> 转换。
+                    <br>不开启时，<code>/v1/responses</code> 将按原样透传到上游。
+                </div>
+                <div id="endpointConversionInfo" class="form-hint" style="margin-top:10px;">正在读取配置...</div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closeEndpointConversionModal()">取消</button>
+                <button class="btn" onclick="saveEndpointConversionConfig()">保存</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 导入弹窗 -->
     <div class="modal-overlay" id="importModal">
         <div class="modal">
             <h3 class="modal-title">导入 Xiaomi 凭证</h3>
             <div class="form-group">
-                <label class="form-label">Cookie / 凭证数据字符串</label>
-                <textarea id="cookieInput" class="form-control" placeholder='例如: serviceToken="vjQ..."; userId=686621...; xiaomichatbot_ph="6vv..."'></textarea>
-                <div class="form-hint">支持自动解析多格式文本，需至少包含 <code>userId</code>, <code>serviceToken</code> 及 <code>xiaomichatbot_ph</code>。系统会自动提取值。</div>
+                <label class="form-label">Cookie / 凭证数据</label>
+                <textarea id="cookieInput" class="form-control" placeholder='支持 JSON 格式:
+{
+  "userId": "123",
+  "serviceToken": "xxx",
+  "xiaomichatbot_ph": "yyy"
+}
+
+或 Cookie 字符串:
+serviceToken="xxx"; userId=123; xiaomichatbot_ph="yyy"
+
+也支持 JSON 数组批量导入'></textarea>
+                <div class="form-hint">支持 <strong>JSON 单条/数组</strong> 及 <strong>Cookie 字符串</strong> 格式，需至少包含 <code>userId</code>, <code>serviceToken</code> 及 <code>xiaomichatbot_ph</code>。</div>
             </div>
             <div class="modal-actions">
                 <button class="btn btn-outline" onclick="closeModal()">取消</button>
@@ -542,6 +576,68 @@
         }
 
         let bridgeNodes = [];
+        let endpointConversionConfig = null;
+
+        function renderEndpointConversionConfig() {
+            const input = document.getElementById('endpointConversionEnabledInput');
+            const info = document.getElementById('endpointConversionInfo');
+            const btn = document.getElementById('endpointConversionBtn');
+            if (!endpointConversionConfig) return;
+            const enabled = endpointConversionConfig.enabled === true;
+            if (input) input.checked = enabled;
+            if (btn) btn.textContent = enabled ? '端点转换：开' : '端点转换：关';
+            if (info) {
+                info.innerHTML = enabled
+                    ? '当前已开启：<code>/v1/responses</code> 会转换到上游 <code>/v1/chat/completions</code>。'
+                    : '当前未开启：所有端点按原路径透传。';
+            }
+        }
+
+        async function fetchEndpointConversionConfig() {
+            try {
+                const res = await apiFetch('/api/endpoint_conversion');
+                endpointConversionConfig = await res.json();
+                renderEndpointConversionConfig();
+            } catch (e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    console.error('读取端点转换配置失败', e);
+                }
+            }
+        }
+
+        async function openEndpointConversionModal() {
+            document.getElementById('endpointConversionModal').classList.add('active');
+            await fetchEndpointConversionConfig();
+        }
+
+        function closeEndpointConversionModal() {
+            document.getElementById('endpointConversionModal').classList.remove('active');
+        }
+
+        async function saveEndpointConversionConfig() {
+            const input = document.getElementById('endpointConversionEnabledInput');
+            const enabled = !!(input && input.checked);
+            try {
+                const res = await apiFetch('/api/endpoint_conversion', {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ enabled })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.detail || '保存失败', 'error');
+                    return;
+                }
+                endpointConversionConfig = data;
+                renderEndpointConversionConfig();
+                showToast(enabled ? '端点转换已开启' : '端点转换已关闭');
+                closeEndpointConversionModal();
+            } catch (e) {
+                if (e.message !== 'UNAUTHORIZED') {
+                    showToast('保存端点转换配置失败', 'error');
+                }
+            }
+        }
 
         async function fetchStatus() {
             // 认证开启但未登录时，跳过状态请求（避免 401 清空密码输入框）
@@ -552,15 +648,16 @@
                 const indicator = document.getElementById('statusIndicator');
                 const text = document.getElementById('statusText');
 
-                if (data.active_clients > 0) {
+                const availableClients = data.available_clients ?? data.active_clients ?? 0;
+                if (availableClients > 0) {
                     indicator.className = 'status-indicator';
-                    text.textContent = `内网通信节点保持连接: ${data.active_clients} 个`;
+                    text.textContent = `可用桥接节点: ${availableClients} 个 / 连接中: ${data.active_clients || 0} 个`;
                 } else {
                     indicator.className = 'status-indicator offline';
-                    text.textContent = `危险！没有任何一个内网节点在线，所有 API 请求将被退回`;
+                    text.textContent = `危险！没有任何一个可用桥接节点，所有 API 请求将被退回`;
                 }
 
-                bridgeNodes = data.nodes || [];
+                bridgeNodes = (data.nodes || []).filter(n => n.registered && n.available);
                 renderUsersWithBridge();
             } catch(e) {
                 if (e.message === 'UNAUTHORIZED') {
@@ -580,24 +677,20 @@
                 return;
             }
 
-            // 构建按 user_id 索引的节点映射
+            // 构建按 user_id 索引的节点映射；只使用已注册且可用的节点。
             const nodesByUserId = {};
-            const unassignedNodes = [];
             bridgeNodes.forEach(n => {
-                if (n.user_id) {
+                if (!n.user_id) return;
+                const existing = nodesByUserId[n.user_id];
+                // 同账号如果短时间出现多个 bridge，展示最新接入的那个。
+                if (!existing || (n.uptime || 0) < (existing.uptime || 0)) {
                     nodesByUserId[n.user_id] = n;
-                } else {
-                    unassignedNodes.push(n);
                 }
             });
 
             tbody.innerHTML = lastUsersData.map((u, idx) => {
-                // 匹配桥接节点：通过 userId 关联，未匹配则尝试分配未关联节点
+                // 桥接节点必须通过 userId 精确关联；不再把未注册节点按顺序分配，避免误判在线。
                 let matchedNode = nodesByUserId[u.userId];
-                if (!matchedNode && unassignedNodes.length > 0) {
-                    // 降级：将未关联的节点按顺序分配给没有匹配到节点的账号
-                    matchedNode = unassignedNodes.shift();
-                }
 
                 let bridgeHtml;
                 if (matchedNode) {
@@ -891,7 +984,11 @@
                 
                 const data = await res.json();
                 if(res.ok) {
-                    showToast(`成功提取并存入 userId: ${data.userId}`);
+                    if (data.imported && data.imported > 1) {
+                        showToast('成功批量导入 ' + data.imported + ' 个账号');
+                    } else {
+                        showToast(`成功导入 userId: ${data.userId}`);
+                    }
                     closeModal();
                     fetchUsers();
                 } else {
@@ -905,7 +1002,7 @@
         }
 
         async function initializeDashboard() {
-            await Promise.all([fetchStatus(), fetchUsers()]);
+            await Promise.all([fetchStatus(), fetchUsers(), fetchEndpointConversionConfig()]);
             startStatusPolling();
         }
 

@@ -541,7 +541,11 @@ def build_gateway_stats(background_tasks_count: int) -> dict[str, Any]:
 
     for index, client in enumerate(state.active_clients):
         cooldown_until = state.client_cooldowns.get(id(client), 0)
-        is_available = cooldown_until <= now
+        info = state.node_info.get(id(client), {})
+        user_id = str(info.get("user_id") or "")
+        is_registered = bool(user_id)
+        is_disabled = bool(info.get("disabled"))
+        is_available = is_registered and not is_disabled and cooldown_until <= now
         if is_available:
             available_clients += 1
 
@@ -554,6 +558,10 @@ def build_gateway_stats(background_tasks_count: int) -> dict[str, Any]:
             "node": node_key,
             "client_id": id(client),
             "available": is_available,
+            "registered": is_registered,
+            "disabled": is_disabled,
+            "disabled_reason": info.get("disabled_reason", ""),
+            "user_id": user_id,
             "cooldown_until": int(cooldown_until) if cooldown_until > now else 0,
             "cooldown_remaining_seconds": max(0, int(cooldown_until - now)),
             "pending_requests": len(tracked_req_ids),

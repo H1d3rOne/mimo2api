@@ -1,0 +1,48 @@
+# 复制为 wrangler.toml 后再修改：
+#   cp wrangler.example.toml wrangler.toml
+# wrangler.toml 会被 .gitignore 忽略，适合写入自己的 Worker 域名、KV id 等本地配置。
+
+name = "mimo2api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "GATEWAY"
+class_name = "GatewayDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewayDurableObject"]
+
+# 创建命令：wrangler kv namespace create MIMO_KV
+# 把输出中的 id 填到这里。
+[[kv_namespaces]]
+binding = "MIMO_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[triggers]
+crons = ["*/2 * * * *"]
+
+[vars]
+# Worker 自身 /ws 地址。部署到自定义域名后改成：wss://你的域名/ws
+MIMO2API_WS_URL = "wss://your-worker-domain.example.com/ws"
+
+# 可选：Cloudflare 优选连接地址（Xray 风格 address）；也可在 WebUI 顶部“优选连接”里配置。
+# Worker Host/SNI 仍使用 MIMO2API_WS_URL 的域名。
+# 例如：实际 TCP 连接 cf-best.example.com，但 Host/SNI 仍为 your-worker-domain.example.com。
+# MIMO2API_PREFERRED_BASE_URL = "https://cf-best.example.com"
+# MIMO2API_PREFERRED_WS_URL = "wss://cf-best.example.com/ws"
+
+# 可选：默认是否开启 /v1/responses -> /v1/chat/completions 端点转换；也可在 WebUI 顶部“端点转换”里配置。
+MIMO_ENDPOINT_CONVERSION_ENABLED = "false"
+
+# 可选：模型映射 JSON。WebUI 修改后的映射会优先持久化到 KV。
+# MODEL_MAPPING_JSON = '{"gpt-5.4-mini":"mimo-v2-flash"}'
+
+# 敏感信息请使用 wrangler secret，不要写在 wrangler.toml：
+#   wrangler secret put MIMO_RELAY_OPENAI_KEY
+#   wrangler secret put MIMO_WEBUI_USERNAME
+#   wrangler secret put MIMO_WEBUI_PASSWORD
+#   wrangler secret put MIMO_PROXY_URL
+#   wrangler secret put MIMO_TUNNEL_TOKEN

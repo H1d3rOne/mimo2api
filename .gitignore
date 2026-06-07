@@ -13,6 +13,7 @@ venv/
 app_state.json
 claw_users.json
 oc_history.json
+endpoint_conversion.json
 users/*.json
 logs/
 data/
@@ -24,3 +25,16 @@ archive/http_captures/
 .ai_memory/
 .vscodestatus_page/
 status_page/
+
+# Node / Cloudflare Worker
+node_modules/
+cloudflare-worker/node_modules/
+cloudflare-worker/worker.js
+cloudflare-worker/worker.js.map
+cloudflare-worker/.dev.vars
+cloudflare-worker/.dev.vars.*
+!cloudflare-worker/.dev.vars.example
+
+# 本地 Cloudflare 部署配置可能包含 KV id、账号域名、路由等个人信息
+cloudflare-worker/wrangler.toml
+!cloudflare-worker/wrangler.example.toml
