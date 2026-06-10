@@ -1,0 +1,43 @@
+name: Probe aistudio reachability
+
+# 一次性连通性探测：验证 GitHub Actions runner 能否直连 aistudio.xiaomimimo.com。
+# 不使用任何凭据，纯网络探测。手动触发。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner egress IP
+        run: |
+          echo "=== runner 出口 IP ==="
+          curl -s --max-time 10 https://api.ipify.org || true
+          echo
+
+      - name: DNS resolve
+        run: |
+          echo "=== DNS aistudio.xiaomimimo.com ==="
+          getent hosts aistudio.xiaomimimo.com || true
+          echo "--- dig ---"
+          dig +short aistudio.xiaomimimo.com || true
+
+      - name: TCP / TLS handshake
+        run: |
+          echo "=== TLS handshake (openssl) ==="
+          timeout 15 openssl s_client -connect aistudio.xiaomimimo.com:443 \
+            -servername aistudio.xiaomimimo.com </dev/null 2>&1 | head -30 || true
+
+      - name: HTTP probe (status endpoint)
+        run: |
+          echo "=== HTTP GET /open-apis/user/mimo-claw/status (no cookie) ==="
+          curl -s -o /tmp/body.txt -w "HTTP:%{http_code} TIME:%{time_total}s\n" \
+            --max-time 20 \
+            -H "Accept: */*" \
+            -H "Origin: https://aistudio.xiaomimimo.com" \
+            -H "Referer: https://aistudio.xiaomimimo.com/" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            "https://aistudio.xiaomimimo.com/open-apis/user/mimo-claw/status" || true
+          echo "--- body (first 300 bytes) ---"
+          head -c 300 /tmp/body.txt || true
+          echo
