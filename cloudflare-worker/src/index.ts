@@ -24,6 +24,7 @@ import { loadNetworkConfig } from "./network-config";
 import { appendBridgeToken, getBridgeToken } from "./bridge-auth";
 import { convertResponsesRequestToChat, loadEndpointConversionConfig, transformChatCompletionResponseToResponses } from "./endpoint-conversion";
 import { getControlChannelMode, getGatewayEgressFetch, getControlChannelLabel, getControlProxyUrl } from "./control-channel";
+import { ClawManager } from "./claw-manager";
 import type { Env } from "./types";
 
 export { GatewayDurableObject } from "./gateway-do";
@@ -64,9 +65,15 @@ function jsonResponse(data: unknown, status = 200, headers: Record<string, strin
 
 // 冷启动兜底端点：供外部（GitHub Actions）调用。
 // - 鉴权：Authorization: Bearer <MIMO_COLDSTART_KEY>，常量时间比较。
-// - 逻辑：查当前可调度在线实例数（availableClients）。只有为 0（全部离线）时，
-//   才从用户池随机挑一个返回其 cookie 三件套，供外部直连 aistudio 拉起实例。
-//   有在线实例时只返回 {needColdStart:false}，不暴露任何凭据。
+// - 判断依据：aistudio 控制面的真实实例状态（status==AVAILABLE），不看 bridge/WS。
+//   bridge 的 WS 可能在实例已销毁后仍残留在线（僵尸连接），不能用来判断实例可用。
+//
+// 两分支（兼顾风控：Worker 能确认有实例时，GitHub 完全不碰 aistudio）：
+//   1) Worker 查到任意 AVAILABLE → {needColdStart:false}，不吐凭据，GitHub 直接退出。
+//      覆盖绝大多数时候，避免 GitHub 频繁异地访问 aistudio 触发风控。
+//   2) Worker 没查到任何 AVAILABLE（全部非 AVAILABLE，或通道断查不到）→ 吐【全部】凭据，
+//      由 GitHub 直连 aistudio 再独立验证一遍真实状态，全部确认非 AVAILABLE 才 create。
+//      给全部凭据是为了让 GitHub 全量复核，避免“单凭据离线但其他实例在线”的误判。
 async function handleColdStart(request: Request, env: Env): Promise<Response> {
   const expected = (env.MIMO_COLDSTART_KEY || "").trim();
   if (!expected) {
@@ -78,35 +85,39 @@ async function handleColdStart(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ error: "unauthorized" }, 401);
   }
 
-  let availableClients = 0;
-  try {
-    const stats = await gatewayStats(env);
-    availableClients =
-      typeof stats.availableClients === "number" ? Number(stats.availableClients) : 0;
-  } catch (err) {
-    return jsonResponse({ error: `stats unavailable: ${String(err).slice(0, 200)}` }, 502);
-  }
-
-  if (availableClients > 0) {
-    return jsonResponse({ needColdStart: false, availableClients });
-  }
-
   const store = new UserStore(env.MIMO_KV);
   const users = await store.listAllUsers();
   const pool = users.filter((u) => u.userId && u.serviceToken && u.xiaomichatbot_ph);
   if (pool.length === 0) {
-    return jsonResponse({ needColdStart: true, availableClients, error: "no usable credentials in pool" }, 409);
+    return jsonResponse({ needColdStart: false, error: "no usable credentials in pool" }, 409);
   }
 
-  const picked = pool[Math.floor(Math.random() * pool.length)];
+  // 逐个查 aistudio 控制面真实状态：任意一个 AVAILABLE 就视为有可用实例，无需冷启动。
+  // 注意：通道断时 getStatus 会返回空 status，此时算作“未查到 AVAILABLE”，
+  // 走分支 2 交给 GitHub 复核（GitHub 直连不依赖 tunnel）。
+  const controlFetch = getGatewayEgressFetch(env);
+  const proxyUrl = getControlProxyUrl(env);
+  let availableInstances = 0;
+  for (const u of pool) {
+    const manager = new ClawManager(u, proxyUrl, controlFetch);
+    const st = await manager.getStatus();
+    if (st.status === "AVAILABLE") availableInstances++;
+  }
+
+  // 分支 1：Worker 已确认有可用实例 → 不吐凭据，GitHub 不碰 aistudio。
+  if (availableInstances > 0) {
+    return jsonResponse({ action: "none", availableInstances });
+  }
+
+  // 分支 2：Worker 没查到任何 AVAILABLE → 吐全部凭据，交给 GitHub 直连复核 + 决定 create。
   return jsonResponse({
-    needColdStart: true,
-    availableClients,
-    credential: {
-      userId: picked.userId,
-      serviceToken: picked.serviceToken,
-      xiaomichatbot_ph: picked.xiaomichatbot_ph,
-    },
+    action: "verify",
+    availableInstances: 0,
+    credentials: pool.map((u) => ({
+      userId: u.userId,
+      serviceToken: u.serviceToken,
+      xiaomichatbot_ph: u.xiaomichatbot_ph,
+    })),
   });
 }
 
