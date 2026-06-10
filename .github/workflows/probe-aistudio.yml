@@ -4,6 +4,9 @@ name: Probe aistudio reachability
 # 不使用任何凭据，纯网络探测。手动触发。
 on:
   workflow_dispatch:
+  push:
+    branches: [dev]
+    paths: [".github/workflows/probe-aistudio.yml"]
 
 jobs:
   probe:
