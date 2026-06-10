@@ -13,18 +13,22 @@ import { loadNetworkConfig, savePreferredBaseUrl } from "./network-config";
 import { loadEndpointConversionConfig, saveEndpointConversionEnabled } from "./endpoint-conversion";
 import { appendBridgeToken, getBridgeToken } from "./bridge-auth";
 import { getBridgeInjectionPrompt, RESET_CMD } from "./claw-ws-client";
+import { getControlChannelLabel, getControlChannelMode, getGatewayEgressFetch, getControlProxyUrl } from "./control-channel";
 
 // ─── Cookie 鉴权 ────────────────────────────────────────────────
 
 const SESSION_COOKIE = "mimo2api_session";
 const SESSION_TTL = 86400; // 24 小时
 const PROXY_HEALTH_CACHE_MS = 60_000;
+const MIMO_AISTUDIO_BASE_URL = "https://aistudio.xiaomimimo.com";
 
 let proxyHealthCache: { ts: number; value: Record<string, unknown> } | null = null;
 
 async function checkProxyHealth(env: Env): Promise<Record<string, unknown>> {
+  const mode = getControlChannelMode(env);
+  const label = getControlChannelLabel(mode);
   const proxyUrl = (env.MIMO_PROXY_URL || "").replace(/\/+$/, "");
-  if (!proxyUrl) return { status: "not_configured" };
+  if (mode === "direct") return { status: "not_configured", mode, label };
 
   const now = Date.now();
   if (proxyHealthCache && now - proxyHealthCache.ts < PROXY_HEALTH_CACHE_MS) {
@@ -34,7 +38,9 @@ async function checkProxyHealth(env: Env): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
-    const resp = await fetch(proxyUrl, {
+    const targetUrl = mode === "proxy" ? proxyUrl : MIMO_AISTUDIO_BASE_URL;
+    const fetcher = mode === "gateway" ? getGatewayEgressFetch(env) : undefined;
+    const resp = await (fetcher || fetch)(targetUrl, {
       method: "GET",
       redirect: "manual",
       signal: controller.signal,
@@ -47,17 +53,21 @@ async function checkProxyHealth(env: Env): Promise<Record<string, unknown>> {
     const tunnelError = resp.status === 530 || /1033|argo tunnel error|cloudflare tunnel error/i.test(body);
     const value = {
       status: tunnelError ? "unreachable" : "reachable",
+      mode,
+      label,
       http_status: resp.status,
       checked_at: now,
-      note: tunnelError ? "MIMO_PROXY_URL 返回 Cloudflare Tunnel 错误" : "MIMO_PROXY_URL 有 HTTP 响应",
+      note: tunnelError ? `${label} 返回 Cloudflare Tunnel 错误` : `${label} 有 HTTP 响应`,
     };
     proxyHealthCache = { ts: now, value };
     return value;
   } catch (err) {
     const value = {
       status: "unreachable",
+      mode,
+      label,
       checked_at: now,
-      note: `MIMO_PROXY_URL 请求失败: ${String(err).slice(0, 120)}`,
+      note: `${label} 请求失败: ${String(err).slice(0, 120)}`,
     };
     proxyHealthCache = { ts: now, value };
     return value;
@@ -194,7 +204,11 @@ export async function handleWebuiRoute(
 	      active_clients: gatewayData.activeClients || 0,
 	      available_clients: managedAvailableClients,
 	      gateway_available_clients: gatewayData.availableClients || 0,
+	      control_channel_mode: getControlChannelMode(env),
+	      control_channel_label: getControlChannelLabel(getControlChannelMode(env)),
 	      proxy_url_configured: Boolean(env.MIMO_PROXY_URL),
+	      vpc_service_configured: Boolean(env.MIMO_AISTUDIO),
+	      egress_binding_configured: Boolean(env.EGRESS),
 	      tunnel_token_configured: Boolean(env.MIMO_TUNNEL_TOKEN),
 	      proxy_health: await checkProxyHealth(env),
 	      nodes,
@@ -288,7 +302,7 @@ export async function handleWebuiRoute(
 
     const results = await Promise.all(
       users.map(async (u) => {
-        const manager = new ClawManager(u, env.MIMO_PROXY_URL);
+        const manager = new ClawManager(u, getControlProxyUrl(env), getGatewayEgressFetch(env));
         const status = await manager.getStatus();
         const lifecycleState = await getLifecycleState(env.MIMO_KV, u.userId);
         const bridgeNode = bridgeByUserId.get(u.userId);
@@ -435,7 +449,7 @@ export async function handleWebuiRoute(
     if (!user) return json({ ok: false, error: `账号 ${uid} 未找到` }, 404);
 
     try {
-      const manager = new ClawManager(user, env.MIMO_PROXY_URL);
+      const manager = new ClawManager(user, getControlProxyUrl(env), getGatewayEgressFetch(env));
       await manager.destroy();
       return json({ ok: true, message: "销毁请求已发送" });
     } catch (e) {
@@ -451,7 +465,7 @@ export async function handleWebuiRoute(
     if (!user) return json({ ok: false, error: `账号 ${uid} 未找到` }, 404);
 
     try {
-      const manager = new ClawManager(user, env.MIMO_PROXY_URL);
+      const manager = new ClawManager(user, getControlProxyUrl(env), getGatewayEgressFetch(env));
       const state = await getLifecycleState(env.MIMO_KV, uid);
       state.phase = "creating";
       state.currentRoundStart = Date.now();
@@ -483,7 +497,7 @@ export async function handleWebuiRoute(
     if (!user) return json({ ok: false, error: `账号 ${uid} 未找到` }, 404);
 
     try {
-      const manager = new ClawManager(user, env.MIMO_PROXY_URL);
+      const manager = new ClawManager(user, getControlProxyUrl(env), getGatewayEgressFetch(env));
       await manager.destroy();
       // 不等待，直接触发创建请求
       const result = await manager.create();
@@ -1376,10 +1390,11 @@ serviceToken="xxx"; userId=123; xiaomichatbot_ph="yyy"
 		                        hints.push('未检测到任何 Bridge 连接。桥接状态只表示 bridge.py 是否连上 Worker /ws；如实例已可用，请检查 /tmp/bridge.log 或重新注入 bridge。');
 		                    }
 		                    var proxyHealth = data.proxy_health || {};
+		                    var controlLabel = data.control_channel_label || proxyHealth.label || '管理通道';
 		                    if (proxyHealth.status === 'reachable') {
-		                        hints.push('管理通道检测：MIMO_PROXY_URL 可达（辅助判断，不代表每个 Tunnel connector 在线）。');
+		                        hints.push('管理通道检测：' + controlLabel + ' 可达（辅助判断，不代表每个 connector 在线）。');
 		                    } else if (proxyHealth.status === 'unreachable') {
-		                        hints.push('管理通道检测：MIMO_PROXY_URL 不可达' + (proxyHealth.http_status ? '，HTTP ' + proxyHealth.http_status : '') + '。');
+		                        hints.push('管理通道检测：' + controlLabel + ' 不可达' + (proxyHealth.http_status ? '，HTTP ' + proxyHealth.http_status : '') + '。');
 		                    }
 		                    if (hints.length > 0) {
 		                        hint.textContent = hints.join(' ');

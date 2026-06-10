@@ -6,6 +6,7 @@
  */
 
 import { UserInfo, ClawStatus, ClawStatusResponse } from "./types";
+import type { ControlFetch } from "./control-channel";
 
 const BASE_URL = "https://aistudio.xiaomimimo.com";
 
@@ -70,14 +71,16 @@ function isSuccess(data: ApiResponse): boolean {
 export class ClawManager {
   private user: UserInfo;
   private cookies: Record<string, string>;
-  private tunnelDomain: string | undefined;
+  private proxyBaseUrl: string | undefined;
+  private controlFetch: ControlFetch | undefined;
 
-  constructor(user: UserInfo, proxyUrl?: string) {
+  constructor(user: UserInfo, proxyUrl?: string, controlFetch?: ControlFetch) {
     this.user = user;
     this.cookies = buildCookies(user);
-    // proxyUrl 现在是 Tunnel 域名（如 https://mimo-tunnel.your-domain.com）
-    // 用于替换 aistudio.xiaomimimo.com，路径保持不变
-    this.tunnelDomain = proxyUrl;
+    // proxyUrl 是可选管理通道代理域名（Tunnel/反代），用于替换 aistudio host，路径保持不变。
+    // 未配置 proxyUrl 时，可通过 controlFetch 走 Cloudflare Gateway/Zero Trust EGRESS binding。
+    this.proxyBaseUrl = (proxyUrl || "").replace(/\/+$/, "") || undefined;
+    this.controlFetch = controlFetch;
   }
 
   get userId(): string {
@@ -88,13 +91,16 @@ export class ClawManager {
     return this.user.name;
   }
 
-  /** 通过 Tunnel 域名替换发起 fetch 请求 */
+  /** 通过管理通道发起 fetch 请求 */
   private async proxiedFetch(url: string, init: RequestInit): Promise<Response> {
-    if (this.tunnelDomain) {
-      // Tunnel 模式：仅替换域名，路径保持不变
+    if (this.proxyBaseUrl) {
+      // 代理/Tunnel 模式：仅替换域名，路径保持不变
       // https://aistudio.xiaomimimo.com/open-apis/... → https://mimo-tunnel.your-domain.com/open-apis/...
-      const proxyTarget = url.replace(BASE_URL, this.tunnelDomain);
+      const proxyTarget = url.replace(BASE_URL, this.proxyBaseUrl);
       return fetch(proxyTarget, init);
+    }
+    if (this.controlFetch) {
+      return this.controlFetch(url, init);
     }
     return fetch(url, init);
   }
@@ -172,8 +178,8 @@ export class ClawManager {
         if (cfMatch) {
           const cfCode = cfMatch[1];
           const cfErrors: Record<string, string> = {
-            "1002": "DNS 解析受限（CF Worker 无法直连受 CF 保护的站点），请在容器中配置 Cloudflare Tunnel（设置 MIMO_TUNNEL_TOKEN 和 MIMO_PROXY_URL）",
-            "1042": "Worker 子请求命中了同 zone 的另一个 Worker。通常是 MIMO_PROXY_URL 配错了：未配置 Tunnel 时请删除 MIMO_PROXY_URL；如确实要走同 zone Tunnel/Worker，请使用独立 Tunnel hostname 或启用 global_fetch_strictly_public。",
+            "1002": "DNS/出站受限（Worker 直连 aistudio 失败）。可配置 Cloudflare Gateway EGRESS，或配置 MIMO_PROXY_URL + MIMO_TUNNEL_TOKEN 走 Tunnel 管理通道。",
+            "1042": "Worker 子请求命中了同 zone 的另一个 Worker。通常是 MIMO_PROXY_URL 配错了：未配置代理/Tunnel 时请删除 MIMO_PROXY_URL；如确实要走同 zone 代理，请使用独立 hostname 或启用 global_fetch_strictly_public。",
             "1015": "请求频率过高，被 Cloudflare 限流",
             "1020": "访问被 Cloudflare 安全规则拦截",
           };

@@ -23,6 +23,7 @@ import { getBridgeCode, getSetupScript } from "./claw-ws-client";
 import { loadNetworkConfig } from "./network-config";
 import { appendBridgeToken, getBridgeToken } from "./bridge-auth";
 import { convertResponsesRequestToChat, loadEndpointConversionConfig, transformChatCompletionResponseToResponses } from "./endpoint-conversion";
+import { getControlChannelMode, getGatewayEgressFetch, getControlChannelLabel, getControlProxyUrl } from "./control-channel";
 import type { Env } from "./types";
 
 export { GatewayDurableObject } from "./gateway-do";
@@ -59,6 +60,62 @@ function jsonResponse(data: unknown, status = 200, headers: Record<string, strin
     status,
     headers: { "Content-Type": "application/json", ...headers },
   });
+}
+
+// 冷启动兜底端点：供外部（GitHub Actions）调用。
+// - 鉴权：Authorization: Bearer <MIMO_COLDSTART_KEY>，常量时间比较。
+// - 逻辑：查当前可调度在线实例数（availableClients）。只有为 0（全部离线）时，
+//   才从用户池随机挑一个返回其 cookie 三件套，供外部直连 aistudio 拉起实例。
+//   有在线实例时只返回 {needColdStart:false}，不暴露任何凭据。
+async function handleColdStart(request: Request, env: Env): Promise<Response> {
+  const expected = (env.MIMO_COLDSTART_KEY || "").trim();
+  if (!expected) {
+    return jsonResponse({ error: "cold-start disabled: MIMO_COLDSTART_KEY not set" }, 503);
+  }
+  const auth = request.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (!token || !timingSafeEqual(token, expected)) {
+    return jsonResponse({ error: "unauthorized" }, 401);
+  }
+
+  let availableClients = 0;
+  try {
+    const stats = await gatewayStats(env);
+    availableClients =
+      typeof stats.availableClients === "number" ? Number(stats.availableClients) : 0;
+  } catch (err) {
+    return jsonResponse({ error: `stats unavailable: ${String(err).slice(0, 200)}` }, 502);
+  }
+
+  if (availableClients > 0) {
+    return jsonResponse({ needColdStart: false, availableClients });
+  }
+
+  const store = new UserStore(env.MIMO_KV);
+  const users = await store.listAllUsers();
+  const pool = users.filter((u) => u.userId && u.serviceToken && u.xiaomichatbot_ph);
+  if (pool.length === 0) {
+    return jsonResponse({ needColdStart: true, availableClients, error: "no usable credentials in pool" }, 409);
+  }
+
+  const picked = pool[Math.floor(Math.random() * pool.length)];
+  return jsonResponse({
+    needColdStart: true,
+    availableClients,
+    credential: {
+      userId: picked.userId,
+      serviceToken: picked.serviceToken,
+      xiaomichatbot_ph: picked.xiaomichatbot_ph,
+    },
+  });
+}
+
+// 常量时间字符串比较，避免对 MIMO_COLDSTART_KEY 的计时侧信道。
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 // ─── AI 鉴权中间件 ──────────────────────────────────────────────
@@ -157,8 +214,9 @@ async function buildLifecycleSafety(env: Env): Promise<LifecycleSafety> {
     activeNodeUserIds,
     activeNodes,
     destroyingCount,
-    // 只有使用 MIMO_PROXY_URL 时才保护最后一个 connector；直连模式不需要。
-    protectLastConnector: Boolean(env.MIMO_PROXY_URL),
+    // 只有使用依赖 Claw 容器内 cloudflared 的 MIMO_PROXY_URL 时才保护最后一个 connector；
+    // Gateway EGRESS / direct fetch 不需要。
+    protectLastConnector: getControlChannelMode(env) === "proxy",
   };
 }
 
@@ -416,7 +474,16 @@ async function handleScheduled(env: Env): Promise<void> {
   for (const userId of userIds) {
     try {
       const safety = await buildLifecycleSafety(env);
-      const result = await lifecycleTick(env.MIMO_KV, userId, wsUrl, env.MIMO_PROXY_URL, env.MIMO_TUNNEL_TOKEN, safety, networkConfig.bridge_connect_host || "");
+      const result = await lifecycleTick(
+        env.MIMO_KV,
+        userId,
+        wsUrl,
+        getControlProxyUrl(env),
+        env.MIMO_TUNNEL_TOKEN,
+        safety,
+        networkConfig.bridge_connect_host || "",
+        getGatewayEgressFetch(env),
+      );
       if (result.error) {
         console.error(`[Scheduled] 用户 ${userId}: ${result.action} - ${result.error}`);
       } else {
@@ -516,15 +583,30 @@ export default {
 
     // 健康检查
     if (path === "/health") {
+      const controlChannelMode = getControlChannelMode(env);
       return jsonResponse({
         status: "ok",
         timestamp: Date.now(),
         gateway: "durable_object",
+        control_channel: {
+          mode: controlChannelMode,
+          label: getControlChannelLabel(controlChannelMode),
+          proxy_url_configured: Boolean(env.MIMO_PROXY_URL),
+          token_configured: Boolean(env.MIMO_TUNNEL_TOKEN),
+          vpc_service_configured: Boolean(env.MIMO_AISTUDIO),
+          egress_binding_configured: Boolean(env.EGRESS),
+        },
         tunnel: {
           proxy_url_configured: Boolean(env.MIMO_PROXY_URL),
           token_configured: Boolean(env.MIMO_TUNNEL_TOKEN),
         },
       });
+    }
+
+    // 冷启动兜底：供外部（GitHub Actions）查询是否需要拉起实例，并按需领取一个随机凭据。
+    // 仅当全部实例离线时才吐出凭据，平时不暴露任何 cookie。
+    if (path === "/api/cold-start" && request.method === "GET") {
+      return handleColdStart(request, env);
     }
 
     return new Response("Not Found", { status: 404 });

@@ -26,6 +26,9 @@ archive/http_captures/
 .vscodestatus_page/
 status_page/
 
+# Playwright CLI 调试产物（console 日志、页面快照）
+.playwright-cli/
+
 # Node / Cloudflare Worker
 node_modules/
 cloudflare-worker/node_modules/

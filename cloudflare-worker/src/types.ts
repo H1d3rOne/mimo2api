@@ -7,6 +7,11 @@
 export interface Env {
   MIMO_KV: KVNamespace;
   GATEWAY: DurableObjectNamespace;
+  // 可选：Cloudflare Zero Trust Gateway / Workers VPC egress binding
+  // wrangler.toml 中绑定名建议为 EGRESS；未配置时保持普通 Worker fetch。
+  EGRESS?: VpcNetworkBinding;
+  // 可选：Workers VPC Service binding，专门路由到 MIMO AI Studio。
+  MIMO_AISTUDIO?: VpcNetworkBinding;
 
   // AI API 鉴权密钥
   MIMO_RELAY_OPENAI_KEY?: string;
@@ -23,14 +28,24 @@ export interface Env {
   MIMO2API_PREFERRED_WS_URL?: string;
   // 可选：默认是否开启 Responses API -> Chat Completions 端点转换
   MIMO_ENDPOINT_CONVERSION_ENABLED?: string;
-  // Tunnel 代理 URL（解决 CF Worker 无法直连受 CF 保护的站点）
-  // 通过 Cloudflare Tunnel 将 aistudio.xiaomimimo.com 映射到你的子域名
-  // Tunnel 在 Mimo 容器中运行，CF Worker 通过此域名访问 aistudio API
+  // 可选：强制管理通道。gateway/egress/zero-trust, proxy/tunnel, direct
+  MIMO_CONTROL_CHANNEL?: string;
+  // 兼容其它 Worker 项目的开关：true 时强制使用 EGRESS binding。
+  USE_VPC_EGRESS?: string;
+  // 管理通道代理 URL（可用 Tunnel/反代解决 Worker 直连 aistudio 受限）
+  // 通过 Cloudflare Tunnel 等方式将 aistudio.xiaomimimo.com 映射到你的子域名
   // 格式：https://mimo-tunnel.your-domain.com（不带尾部斜杠）
   MIMO_PROXY_URL?: string;
   // Cloudflare Tunnel Token（注入到容器中，让 cloudflared 自动连接）
   // 在 Cloudflare Dashboard → Zero Trust → Networks → Tunnels 创建后获取
   MIMO_TUNNEL_TOKEN?: string;
+  // 冷启动兜底密钥：供外部（GitHub Actions）调用 /api/cold-start 时鉴权。
+  // 全部实例离线时，外部凭此密钥取一个随机凭据直连 aistudio 拉起实例，打破 tunnel 死结。
+  MIMO_COLDSTART_KEY?: string;
+}
+
+export interface VpcNetworkBinding {
+  fetch(input: string | Request | URL, init?: RequestInit): Promise<Response>;
 }
 
 // ─── 用户信息 ────────────────────────────────────────────────────
