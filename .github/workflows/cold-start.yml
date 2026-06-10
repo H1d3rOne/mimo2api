@@ -1,0 +1,120 @@
+name: Cold start Claw instance
+
+# 冷启动兜底：当 Worker 报告所有 Claw 实例都不在线时，
+# 由 GitHub runner 直连 aistudio 拉起一个实例（runner 出口不受 Cloudflare
+# destination_ip_prohibited 限制）。实例一旦在线，容器内 cloudflared 会接通
+# tunnel，Worker 的 MIMO_AISTUDIO 通道随之恢复，后续由 Worker Cron 自行维持。
+#
+# 凭据不写入 GitHub Secrets：仅在确实需要冷启动时，从 Worker 现取一个随机凭据。
+#
+# 需要的仓库 Secrets：
+#   WORKER_BASE_URL    例如 https://mimo.rushai.us.ci
+#   COLDSTART_KEY      与 Worker 的 MIMO_COLDSTART_KEY 相同的共享密钥
+
+on:
+  schedule:
+    - cron: "*/13 * * * *"   # 每约13分钟（GitHub cron 常有延迟，间隔取小以留冗余）
+  workflow_dispatch:
+
+concurrency:
+  group: cold-start
+  cancel-in-progress: false
+
+jobs:
+  cold-start:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check & cold-start
+        env:
+          WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
+          COLDSTART_KEY: ${{ secrets.COLDSTART_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WORKER_BASE_URL:-}" ] || [ -z "${COLDSTART_KEY:-}" ]; then
+            echo "::error::缺少 WORKER_BASE_URL 或 COLDSTART_KEY secret"
+            exit 1
+          fi
+
+          AISTUDIO="https://aistudio.xiaomimimo.com"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+          echo "=== 1. 向 Worker 查询是否需要冷启动 ==="
+          # 凭据可能出现在响应体里，绝不打印 RESP。
+          RESP="$(curl -s --max-time 20 \
+            -H "Authorization: Bearer ${COLDSTART_KEY}" \
+            "${WORKER_BASE_URL%/}/api/cold-start")"
+
+          NEED="$(printf '%s' "$RESP" | jq -r '.needColdStart // false')"
+          AVAIL="$(printf '%s' "$RESP" | jq -r '.availableClients // "?"')"
+          echo "needColdStart=${NEED} availableClients=${AVAIL}"
+
+          if [ "$NEED" != "true" ]; then
+            echo "已有在线实例，无需冷启动。"
+            exit 0
+          fi
+
+          # 取出凭据（仅存在 shell 变量里，开启 mask 防止意外回显）
+          USER_ID="$(printf '%s' "$RESP" | jq -r '.credential.userId // empty')"
+          SERVICE_TOKEN="$(printf '%s' "$RESP" | jq -r '.credential.serviceToken // empty')"
+          PH="$(printf '%s' "$RESP" | jq -r '.credential.xiaomichatbot_ph // empty')"
+          echo "::add-mask::$SERVICE_TOKEN"
+          echo "::add-mask::$PH"
+
+          if [ -z "$USER_ID" ] || [ -z "$SERVICE_TOKEN" ] || [ -z "$PH" ]; then
+            echo "::error::Worker 未返回可用凭据：$(printf '%s' "$RESP" | jq -r '.error // "unknown"')"
+            exit 1
+          fi
+          echo "拿到冷启动凭据，userId=${USER_ID}"
+
+          # 构造 Cookie（值含空格或 = 时加引号，与 Worker 端 cookieString 一致）
+          quote_val() {
+            case "$1" in
+              *" "*|*"="*) printf '"%s"' "$1" ;;
+              *) printf '%s' "$1" ;;
+            esac
+          }
+          COOKIE="serviceToken=$(quote_val "$SERVICE_TOKEN"); userId=$(quote_val "$USER_ID"); xiaomichatbot_ph=$(quote_val "$PH")"
+
+          PH_ENC="$(jq -rn --arg v "$PH" '$v|@uri')"
+
+          echo "=== 2. 签署 agreement ==="
+          curl -s -o /dev/null -w "agreement HTTP:%{http_code}\n" --max-time 20 \
+            -X POST \
+            -H "Accept: */*" \
+            -H "Content-Type: application/json" \
+            -H "Origin: ${AISTUDIO}" \
+            -H "Referer: ${AISTUDIO}/" \
+            -H "x-timezone: Asia/Shanghai" \
+            -H "User-Agent: ${UA}" \
+            -H "Cookie: ${COOKIE}" \
+            "${AISTUDIO}/open-apis/agreement/user/mimo-claw?xiaomichatbot_ph=${PH_ENC}" || true
+
+          echo "=== 3. 创建 Claw 实例 ==="
+          CREATE_BODY="$(curl -s -w "\nHTTP:%{http_code}" --max-time 30 \
+            -X POST \
+            -H "Accept: */*" \
+            -H "Content-Type: application/json" \
+            -H "Origin: ${AISTUDIO}" \
+            -H "Referer: ${AISTUDIO}/" \
+            -H "x-timezone: Asia/Shanghai" \
+            -H "User-Agent: ${UA}" \
+            -H "Cookie: ${COOKIE}" \
+            "${AISTUDIO}/open-apis/user/mimo-claw/create?xiaomichatbot_ph=${PH_ENC}")"
+
+          CREATE_CODE="$(printf '%s' "$CREATE_BODY" | sed -n 's/^HTTP://p' | tail -1)"
+          CREATE_JSON="$(printf '%s' "$CREATE_BODY" | sed '$d')"
+          echo "create HTTP:${CREATE_CODE}"
+          # create 响应里通常只有 code/message，不含凭据，可安全打印。
+          echo "create resp: $(printf '%s' "$CREATE_JSON" | head -c 300)"
+
+          if [ "$CREATE_CODE" = "200" ]; then
+            echo "✅ 冷启动创建请求已提交，Worker Cron 将接管后续轮询。"
+          elif [ "$CREATE_CODE" = "401" ]; then
+            echo "::warning::凭据已失效（401），该账号需更新。"
+            exit 1
+          elif [ "$CREATE_CODE" = "429" ]; then
+            echo "::warning::负载过高（429），稍后重试。"
+          else
+            echo "::warning::创建返回 HTTP ${CREATE_CODE}"
+          fi
