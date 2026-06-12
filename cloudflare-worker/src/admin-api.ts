@@ -9,7 +9,6 @@ import { UserStore } from "./user-store";
 import { getLifecycleState, deleteLifecycleState, tick as lifecycleTick, type LifecycleSafety } from "./lifecycle";
 import { gatewayStats } from "./gateway-client";
 import { loadNetworkConfig } from "./network-config";
-import { getControlChannelMode, getGatewayEgressFetch, getControlProxyUrl } from "./control-channel";
 
 // ─── WebUI 鉴权 ─────────────────────────────────────────────────
 
@@ -182,16 +181,7 @@ export async function handleAdminApi(
     for (const uid of userIds) {
       try {
         const safety = await buildLifecycleSafety(env);
-        const result = await lifecycleTick(
-          env.MIMO_KV,
-          uid,
-          wsUrl,
-          getControlProxyUrl(env),
-          env.MIMO_TUNNEL_TOKEN,
-          safety,
-          networkConfig.bridge_connect_host || "",
-          getGatewayEgressFetch(env),
-        );
+        const result = await lifecycleTick(env.MIMO_KV, uid, wsUrl, env.MIMO_PROXY_URL, env.MIMO_TUNNEL_TOKEN, safety, networkConfig.bridge_connect_host || "");
         results.push({ userId: uid, ...result });
       } catch (err) {
         results.push({ userId: uid, action: "error", error: String(err) });
@@ -208,16 +198,7 @@ export async function handleAdminApi(
     const wsUrl = networkConfig.effective_ws_url;
     try {
       const safety = await buildLifecycleSafety(env);
-      const result = await lifecycleTick(
-        env.MIMO_KV,
-        userId,
-        wsUrl,
-        getControlProxyUrl(env),
-        env.MIMO_TUNNEL_TOKEN,
-        safety,
-        networkConfig.bridge_connect_host || "",
-        getGatewayEgressFetch(env),
-      );
+      const result = await lifecycleTick(env.MIMO_KV, userId, wsUrl, env.MIMO_PROXY_URL, env.MIMO_TUNNEL_TOKEN, safety, networkConfig.bridge_connect_host || "");
       return json(result);
     } catch (err) {
       return json({ action: "error", error: String(err) }, 500);
@@ -265,7 +246,7 @@ async function buildLifecycleSafety(env: Env): Promise<LifecycleSafety> {
     activeNodeUserIds,
     activeNodes,
     destroyingCount,
-    protectLastConnector: getControlChannelMode(env) === "proxy",
+    protectLastConnector: Boolean(env.MIMO_PROXY_URL),
   };
 }
 

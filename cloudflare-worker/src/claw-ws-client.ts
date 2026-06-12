@@ -8,7 +8,6 @@
  */
 
 import { UserInfo } from "./types";
-import type { ControlFetch } from "./control-channel";
 
 const WS_URL = "wss://aistudio.xiaomimimo.com/ws/proxy";
 const WS_FETCH_URL = "https://aistudio.xiaomimimo.com/ws/proxy";
@@ -68,17 +67,14 @@ export class ClawWsClient {
   private responses = new Map<string, WsResponse>();
   private events: WsEvent[] = [];
   private messageHandler: ((data: string) => void) | null = null;
-  private proxyBaseUrl: string | undefined;
-  private controlFetch: ControlFetch | undefined;
+  private tunnelDomain: string | undefined;
   private lastError = "";
 
-  constructor(user: UserInfo, proxyUrl?: string, controlFetch?: ControlFetch) {
+  constructor(user: UserInfo, proxyUrl?: string) {
     this.user = user;
     this.cookies = buildCookies(user);
-    // proxyUrl 是可选管理通道代理域名（Tunnel/反代）。
-    // 未配置 proxyUrl 时，可通过 controlFetch 走 Cloudflare Gateway/Zero Trust EGRESS binding。
-    this.proxyBaseUrl = (proxyUrl || "").replace(/\/+$/, "") || undefined;
-    this.controlFetch = controlFetch;
+    // proxyUrl 现在是 Tunnel 域名（如 https://mimo-tunnel.your-domain.com）
+    this.tunnelDomain = proxyUrl;
   }
 
   /** 建立 WebSocket 连接到 Claw 容器 */
@@ -87,19 +83,17 @@ export class ClawWsClient {
     const cookieStr = cookieString(this.cookies);
     // Cloudflare Worker 出站 WS 用 fetch(..., Upgrade: websocket)，URL 必须是 http(s)，不能是 ws(s)。
     let fetchUrl: string;
-    let outboundFetch: ControlFetch = (input, init) => fetch(input, init);
-    if (this.proxyBaseUrl) {
+    if (this.tunnelDomain) {
       // https://aistudio.xiaomimimo.com/ws/proxy → https://mimo-tunnel.your-domain.com/ws/proxy
-      fetchUrl = `${WS_FETCH_URL}?ticket=${ticket}`.replace(BASE_URL, this.proxyBaseUrl);
+      fetchUrl = `${WS_FETCH_URL}?ticket=${ticket}`.replace(BASE_URL, this.tunnelDomain.replace(/\/$/, ""));
     } else {
       fetchUrl = `${WS_FETCH_URL}?ticket=${ticket}`;
-      if (this.controlFetch) outboundFetch = this.controlFetch;
     }
 
     return new Promise((resolve) => {
       try {
         // CF Worker 出站 WebSocket：用 fetch Upgrade 才能带 Cookie/Origin。
-        void outboundFetch(fetchUrl, {
+        void fetch(fetchUrl, {
           method: "GET",
           headers: {
             Upgrade: "websocket",

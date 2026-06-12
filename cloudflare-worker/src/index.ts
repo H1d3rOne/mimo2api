@@ -23,8 +23,6 @@ import { getBridgeCode, getSetupScript } from "./claw-ws-client";
 import { loadNetworkConfig } from "./network-config";
 import { appendBridgeToken, getBridgeToken } from "./bridge-auth";
 import { convertResponsesRequestToChat, loadEndpointConversionConfig, transformChatCompletionResponseToResponses } from "./endpoint-conversion";
-import { getControlChannelMode, getGatewayEgressFetch, getControlChannelLabel, getControlProxyUrl } from "./control-channel";
-import { ClawManager } from "./claw-manager";
 import type { Env } from "./types";
 
 export { GatewayDurableObject } from "./gateway-do";
@@ -61,72 +59,6 @@ function jsonResponse(data: unknown, status = 200, headers: Record<string, strin
     status,
     headers: { "Content-Type": "application/json", ...headers },
   });
-}
-
-// 冷启动兜底端点：供外部（GitHub Actions）调用。
-// - 鉴权：Authorization: Bearer <MIMO_COLDSTART_KEY>，常量时间比较。
-// - 判断依据：aistudio 控制面的真实实例状态（status==AVAILABLE），不看 bridge/WS。
-//   bridge 的 WS 可能在实例已销毁后仍残留在线（僵尸连接），不能用来判断实例可用。
-//
-// 两分支（兼顾风控：Worker 能确认有实例时，GitHub 完全不碰 aistudio）：
-//   1) Worker 查到任意 AVAILABLE → {needColdStart:false}，不吐凭据，GitHub 直接退出。
-//      覆盖绝大多数时候，避免 GitHub 频繁异地访问 aistudio 触发风控。
-//   2) Worker 没查到任何 AVAILABLE（全部非 AVAILABLE，或通道断查不到）→ 吐【全部】凭据，
-//      由 GitHub 直连 aistudio 再独立验证一遍真实状态，全部确认非 AVAILABLE 才 create。
-//      给全部凭据是为了让 GitHub 全量复核，避免“单凭据离线但其他实例在线”的误判。
-async function handleColdStart(request: Request, env: Env): Promise<Response> {
-  const expected = (env.MIMO_COLDSTART_KEY || "").trim();
-  if (!expected) {
-    return jsonResponse({ error: "cold-start disabled: MIMO_COLDSTART_KEY not set" }, 503);
-  }
-  const auth = request.headers.get("authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-  if (!token || !timingSafeEqual(token, expected)) {
-    return jsonResponse({ error: "unauthorized" }, 401);
-  }
-
-  const store = new UserStore(env.MIMO_KV);
-  const users = await store.listAllUsers();
-  const pool = users.filter((u) => u.userId && u.serviceToken && u.xiaomichatbot_ph);
-  if (pool.length === 0) {
-    return jsonResponse({ needColdStart: false, error: "no usable credentials in pool" }, 409);
-  }
-
-  // 逐个查 aistudio 控制面真实状态：任意一个 AVAILABLE 就视为有可用实例，无需冷启动。
-  // 注意：通道断时 getStatus 会返回空 status，此时算作“未查到 AVAILABLE”，
-  // 走分支 2 交给 GitHub 复核（GitHub 直连不依赖 tunnel）。
-  const controlFetch = getGatewayEgressFetch(env);
-  const proxyUrl = getControlProxyUrl(env);
-  let availableInstances = 0;
-  for (const u of pool) {
-    const manager = new ClawManager(u, proxyUrl, controlFetch);
-    const st = await manager.getStatus();
-    if (st.status === "AVAILABLE") availableInstances++;
-  }
-
-  // 分支 1：Worker 已确认有可用实例 → 不吐凭据，GitHub 不碰 aistudio。
-  if (availableInstances > 0) {
-    return jsonResponse({ action: "none", availableInstances });
-  }
-
-  // 分支 2：Worker 没查到任何 AVAILABLE → 吐全部凭据，交给 GitHub 直连复核 + 决定 create。
-  return jsonResponse({
-    action: "verify",
-    availableInstances: 0,
-    credentials: pool.map((u) => ({
-      userId: u.userId,
-      serviceToken: u.serviceToken,
-      xiaomichatbot_ph: u.xiaomichatbot_ph,
-    })),
-  });
-}
-
-// 常量时间字符串比较，避免对 MIMO_COLDSTART_KEY 的计时侧信道。
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
 }
 
 // ─── AI 鉴权中间件 ──────────────────────────────────────────────
@@ -225,9 +157,8 @@ async function buildLifecycleSafety(env: Env): Promise<LifecycleSafety> {
     activeNodeUserIds,
     activeNodes,
     destroyingCount,
-    // 只有使用依赖 Claw 容器内 cloudflared 的 MIMO_PROXY_URL 时才保护最后一个 connector；
-    // Gateway EGRESS / direct fetch 不需要。
-    protectLastConnector: getControlChannelMode(env) === "proxy",
+    // 只有使用 MIMO_PROXY_URL 时才保护最后一个 connector；直连模式不需要。
+    protectLastConnector: Boolean(env.MIMO_PROXY_URL),
   };
 }
 
@@ -485,16 +416,7 @@ async function handleScheduled(env: Env): Promise<void> {
   for (const userId of userIds) {
     try {
       const safety = await buildLifecycleSafety(env);
-      const result = await lifecycleTick(
-        env.MIMO_KV,
-        userId,
-        wsUrl,
-        getControlProxyUrl(env),
-        env.MIMO_TUNNEL_TOKEN,
-        safety,
-        networkConfig.bridge_connect_host || "",
-        getGatewayEgressFetch(env),
-      );
+      const result = await lifecycleTick(env.MIMO_KV, userId, wsUrl, env.MIMO_PROXY_URL, env.MIMO_TUNNEL_TOKEN, safety, networkConfig.bridge_connect_host || "");
       if (result.error) {
         console.error(`[Scheduled] 用户 ${userId}: ${result.action} - ${result.error}`);
       } else {
@@ -594,30 +516,15 @@ export default {
 
     // 健康检查
     if (path === "/health") {
-      const controlChannelMode = getControlChannelMode(env);
       return jsonResponse({
         status: "ok",
         timestamp: Date.now(),
         gateway: "durable_object",
-        control_channel: {
-          mode: controlChannelMode,
-          label: getControlChannelLabel(controlChannelMode),
-          proxy_url_configured: Boolean(env.MIMO_PROXY_URL),
-          token_configured: Boolean(env.MIMO_TUNNEL_TOKEN),
-          vpc_service_configured: Boolean(env.MIMO_AISTUDIO),
-          egress_binding_configured: Boolean(env.EGRESS),
-        },
         tunnel: {
           proxy_url_configured: Boolean(env.MIMO_PROXY_URL),
           token_configured: Boolean(env.MIMO_TUNNEL_TOKEN),
         },
       });
-    }
-
-    // 冷启动兜底：供外部（GitHub Actions）查询是否需要拉起实例，并按需领取一个随机凭据。
-    // 仅当全部实例离线时才吐出凭据，平时不暴露任何 cookie。
-    if (path === "/api/cold-start" && request.method === "GET") {
-      return handleColdStart(request, env);
     }
 
     return new Response("Not Found", { status: 404 });

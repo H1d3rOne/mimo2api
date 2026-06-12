@@ -4,8 +4,8 @@
 
 name = "mimo2api"
 main = "src/index.ts"
-compatibility_date = "2026-06-10"
-compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
 name = "GATEWAY"
@@ -21,40 +21,12 @@ new_sqlite_classes = ["GatewayDurableObject"]
 binding = "MIMO_KV"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
-# 可选：Cloudflare Zero Trust Gateway / Workers VPC 出站通道。
-# 启用后，Worker 管理 MIMO AI Studio 时可通过 env.EGRESS.fetch() 出站；
-# 配合 MIMO_CONTROL_CHANNEL="gateway" 时会强制替代 Tunnel 管理通道。
-# 需要先在 Cloudflare Zero Trust / Gateway 中创建可用于 egress 的 VPC network。
-# [[vpc_networks]]
-# binding = "EGRESS"
-# network_id = "cf1:network"
-# remote = true
-#
-# 推荐：为 aistudio.xiaomimimo.com 创建专用 VPC Service 后绑定到 Worker。
-# 若 EGRESS 访问 aistudio 返回 destination_ip_prohibited，可固定到当前 ALB 公网 IP，
-# 由请求 URL 保持 Host/SNI，VPC Service 负责连接到该 IP。
-# wrangler vpc service create mimo-aistudio \
-#   --type http \
-#   --tunnel-id YOUR_TUNNEL_ID \
-#   --ipv4 39.101.90.223 \
-#   --https-port 443 \
-#   --cert-verification-mode disabled
-# [[vpc_services]]
-# binding = "MIMO_AISTUDIO"
-# service_id = "YOUR_VPC_SERVICE_ID"
-# remote = true
-
 [triggers]
 crons = ["*/2 * * * *"]
 
 [vars]
 # Worker 自身 /ws 地址。部署到自定义域名后改成：wss://你的域名/ws
 MIMO2API_WS_URL = "wss://your-worker-domain.example.com/ws"
-
-# 可选：强制管理通道。启用 Gateway EGRESS 时建议打开；
-# 这样即使 Cloudflare secret 里残留旧 MIMO_PROXY_URL，也不会继续走 Tunnel。
-# MIMO_CONTROL_CHANNEL = "gateway"
-# USE_VPC_EGRESS = "true"
 
 # 可选：Cloudflare 优选连接地址（Xray 风格 address）；也可在 WebUI 顶部“优选连接”里配置。
 # Worker Host/SNI 仍使用 MIMO2API_WS_URL 的域名。
@@ -72,5 +44,5 @@ MIMO_ENDPOINT_CONVERSION_ENABLED = "false"
 #   wrangler secret put MIMO_RELAY_OPENAI_KEY
 #   wrangler secret put MIMO_WEBUI_USERNAME
 #   wrangler secret put MIMO_WEBUI_PASSWORD
-#   wrangler secret put MIMO_PROXY_URL      # Tunnel/反代管理通道；Gateway EGRESS 模式通常不需要
-#   wrangler secret put MIMO_TUNNEL_TOKEN   # 仅 Tunnel 模式需要
+#   wrangler secret put MIMO_PROXY_URL
+#   wrangler secret put MIMO_TUNNEL_TOKEN

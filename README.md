@@ -85,9 +85,7 @@ http://你的域名:8000/webui
 - Durable Object 统一维护 `/ws` bridge 连接和请求队列
 - KV 持久化用户、模型映射、端点转换、优选连接和生命周期状态
 - Cron 自动执行 Claw 实例创建、reset、bridge 注入和轮换
-- 支持管理通道二选一：
-  - Cloudflare Zero Trust VPC Service / Gateway（推荐）
-  - Cloudflare Tunnel / 反代：`MIMO_PROXY_URL` + `MIMO_TUNNEL_TOKEN`
+- 支持 Cloudflare Tunnel 访问 MIMO AI Studio 管理接口
 - 支持 Cloudflare 优选连接配置
 - WebUI 账号操作菜单（…）可随时复制：
   - 第 1 条 reset 消息
@@ -108,15 +106,12 @@ npx tsc --noEmit
 npm run deploy
 ```
 
-如启用 Zero Trust VPC/Gateway，推荐先创建专用 VPC Service 绑定到一个健康的 Zero Trust tunnel，并指向 MIMO AI Studio 当前可用的 ALB IP（示例见 `cloudflare-worker/wrangler.example.toml`），再在 `wrangler.toml` 绑定为 `MIMO_AISTUDIO`，并设置 `MIMO_CONTROL_CHANNEL="gateway"`。可保留 `[[vpc_networks]] binding = "EGRESS"` 作为回退；旧版 Wrangler 不能识别时请升级到本项目锁定的 Wrangler 4.x。
-
 常用 secret：
 
 ```bash
 wrangler secret put MIMO_RELAY_OPENAI_KEY
 wrangler secret put MIMO_WEBUI_USERNAME
 wrangler secret put MIMO_WEBUI_PASSWORD
-# Tunnel/反代模式才需要：
 wrangler secret put MIMO_PROXY_URL
 wrangler secret put MIMO_TUNNEL_TOKEN
 ```

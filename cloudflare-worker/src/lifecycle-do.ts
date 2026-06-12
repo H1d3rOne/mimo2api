@@ -13,7 +13,6 @@
 import { ClawManager } from "./claw-manager";
 import { ClawWsClient, getBridgeInjectionPrompt, RESET_CMD, SHUTDOWN_PROMPT, SHUTDOWN_CONFIRM_PROMPT } from "./claw-ws-client";
 import type { UserInfo, LifecycleState, LifecyclePhase } from "./types";
-import { getGatewayEgressFetch, getControlProxyUrl } from "./control-channel";
 
 // ─── 常量 ────────────────────────────────────────────────────────
 
@@ -116,7 +115,7 @@ export class LifecycleDurableObject implements DurableObject {
       return { action: "skip", error: "用户不存在", phase: state.phase };
     }
 
-    const manager = new ClawManager(user, getControlProxyUrl(this.env), getGatewayEgressFetch(this.env));
+    const manager = new ClawManager(user, this.env.MIMO_PROXY_URL);
 
     let result: { action: string; error?: string };
 
@@ -219,7 +218,7 @@ export class LifecycleDurableObject implements DurableObject {
   private async phaseInjecting(state: LifecycleState, manager: ClawManager, user: UserInfo): Promise<{ action: string; error?: string }> {
     console.log(`[LifecycleDO] 用户 ${user.name}: 开始注入 bridge.py...`);
 
-    const client = new ClawWsClient(user, getControlProxyUrl(this.env), getGatewayEgressFetch(this.env));
+    const client = new ClawWsClient(user, this.env.MIMO_PROXY_URL);
 
     // 获取 ticket
     const ticket = await manager.getTicket();
@@ -335,7 +334,7 @@ export class LifecycleDurableObject implements DurableObject {
     // 尝试通过 AI 指令关机
     const status = await manager.getStatus();
     if (status.status === "AVAILABLE") {
-      const client = new ClawWsClient(user, getControlProxyUrl(this.env), getGatewayEgressFetch(this.env));
+      const client = new ClawWsClient(user, this.env.MIMO_PROXY_URL);
       const ticket = await manager.getTicket();
       if (ticket && await this.connectWithRetry(client, ticket, 3, 3000)) {
         const reply = await client.sendMessage(SHUTDOWN_PROMPT, MAX_SHUTDOWN_REPLY_SECONDS);
@@ -493,9 +492,6 @@ interface Env {
   MIMO_WEBUI_PASSWORD?: string;
   MODEL_MAPPING_JSON?: string;
   MIMO2API_WS_URL?: string;
-  EGRESS?: { fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> };
-  MIMO_CONTROL_CHANNEL?: string;
-  USE_VPC_EGRESS?: string;
   MIMO_PROXY_URL?: string;  // Tunnel 代理 URL（替换 aistudio.xiaomimimo.com 域名）
   MIMO_TUNNEL_TOKEN?: string;  // Tunnel Token（注入到容器中）
 }

@@ -11,9 +11,7 @@
 - Worker WebUI 名称为 **Mimo2api**
 - 支持 `/v1/responses` → 上游 `/v1/chat/completions` 端点转换
 - 支持 Cloudflare 优选连接：bridge 连接优选地址，Host/SNI 仍使用 Worker 域名
-- 支持两种 MIMO AI Studio 管理通道：
-  - Cloudflare Zero Trust VPC Service / Gateway（推荐）
-  - Cloudflare Tunnel / 反代：`MIMO_PROXY_URL` + `MIMO_TUNNEL_TOKEN`
+- 支持 Cloudflare Tunnel：Worker 通过 `MIMO_PROXY_URL` 管理 MIMO AI Studio，注入 `MIMO_TUNNEL_TOKEN` 启动 `cloudflared`
 
 ## 架构
 
@@ -57,54 +55,9 @@ MIMO_ENDPOINT_CONVERSION_ENABLED = "false"
 wrangler secret put MIMO_RELAY_OPENAI_KEY
 wrangler secret put MIMO_WEBUI_USERNAME
 wrangler secret put MIMO_WEBUI_PASSWORD
-```
-
-### 管理通道
-
-Worker 需要访问 `https://aistudio.xiaomimimo.com` 的控制面接口来查询、创建、销毁实例和获取 WS ticket。
-
-推荐使用 Cloudflare Zero Trust VPC Service。实测 MIMO 控制面直走公网 EGRESS 可能返回 `destination_ip_prohibited`；专用 VPC Service 绑定到一个健康的 Zero Trust tunnel，并固定到 MIMO AI Studio 当前可用 ALB IP 时可正常访问，同时请求 URL 的 Host/SNI 仍保持 `aistudio.xiaomimimo.com`。
-
-> 如果当前 `wrangler` 不能识别 `[[vpc_networks]]`，先 `npm install` 使用本项目锁定的 Wrangler 4.x。
-
-先创建 VPC Service：
-
-```bash
-npx wrangler vpc service create mimo-aistudio \
-  --type http \
-  --tunnel-id YOUR_TUNNEL_ID \
-  --ipv4 39.101.90.223 \
-  --https-port 443 \
-  --cert-verification-mode disabled
-```
-
-```toml
-# wrangler.toml
-[[vpc_services]]
-binding = "MIMO_AISTUDIO"
-service_id = "上一步返回的 service id"
-remote = true
-
-[[vpc_networks]]
-binding = "EGRESS"
-network_id = "cf1:network"
-remote = true
-
-[vars]
-MIMO_CONTROL_CHANNEL = "gateway"
-USE_VPC_EGRESS = "true"
-```
-
-配置后 Worker 会优先通过 `env.MIMO_AISTUDIO.fetch()` 访问 MIMO AI Studio；未配置 VPC Service 时才回退到 `env.EGRESS.fetch()`。`MIMO_CONTROL_CHANNEL="gateway"` 会强制走 Zero Trust/VPC 通道，即使 Cloudflare secret 里还残留旧 `MIMO_PROXY_URL` 也不会回到 Tunnel 反代。
-
-如果继续使用 Tunnel / 反代，则配置：
-
-```bash
 wrangler secret put MIMO_PROXY_URL
 wrangler secret put MIMO_TUNNEL_TOKEN
 ```
-
-未显式设置 `MIMO_CONTROL_CHANNEL` 时，自动选择顺序为：`MIMO_PROXY_URL` 代理/Tunnel > `MIMO_AISTUDIO` VPC Service > `EGRESS` Gateway > Worker direct fetch；显式设置后以 `MIMO_CONTROL_CHANNEL` 为准。
 
 构建和部署：
 
