@@ -17,6 +17,7 @@ import { ClawManager } from "./claw-manager";
 import { appendBridgeToken, getBridgeToken } from "./bridge-auth";
 import { ClawWsClient, getBridgeInjectionPrompt, RESET_CMD, SHUTDOWN_PROMPT, SHUTDOWN_CONFIRM_PROMPT } from "./claw-ws-client";
 import type { UserInfo, LifecycleState, LifecyclePhase } from "./types";
+import type { ControlFetch } from "./control-channel";
 
 // ─── 常量 ────────────────────────────────────────────────────────
 
@@ -82,6 +83,7 @@ export async function tick(
   tunnelToken?: string,
   safety?: LifecycleSafety,
   bridgeHostHeader = "",
+  controlFetch?: ControlFetch,
 ): Promise<{ action: string; error?: string; phase?: string }> {
   const state = await getLifecycleState(kv, userId);
 
@@ -92,7 +94,7 @@ export async function tick(
     return { action: "skip", error: "用户不存在", phase: state.phase };
   }
 
-  const manager = new ClawManager(user, proxyUrl);
+  const manager = new ClawManager(user, proxyUrl, controlFetch);
 
   let result: { action: string; error?: string };
 
@@ -105,14 +107,14 @@ export async function tick(
       break;
     case "injecting": {
       const bridgeWsUrl = appendBridgeToken(wsUrl, await getBridgeToken(kv));
-      result = await phaseInjecting(state, manager, user, kv, bridgeWsUrl, proxyUrl, tunnelToken, bridgeHostHeader);
+      result = await phaseInjecting(state, manager, user, kv, bridgeWsUrl, proxyUrl, tunnelToken, bridgeHostHeader, controlFetch);
       break;
     }
     case "running":
-      result = await phaseRunning(state, manager, user, kv, safety, wsUrl, proxyUrl, tunnelToken, bridgeHostHeader);
+      result = await phaseRunning(state, manager, user, kv, safety, wsUrl, proxyUrl, tunnelToken, bridgeHostHeader, controlFetch);
       break;
     case "destroying":
-      result = await phaseDestroying(state, manager, user, kv, proxyUrl, safety);
+      result = await phaseDestroying(state, manager, user, kv, proxyUrl, safety, controlFetch);
       break;
     case "error":
       result = await phaseError(state, manager, user, kv);
@@ -306,7 +308,17 @@ async function phaseCreating(state: LifecycleState, manager: ClawManager, user: 
   return { action: "waiting_create" };
 }
 
-async function phaseInjecting(state: LifecycleState, manager: ClawManager, user: UserInfo, kv: KVNamespace, wsUrl: string, proxyUrl?: string, tunnelToken?: string, bridgeHostHeader = ""): Promise<{ action: string; error?: string }> {
+async function phaseInjecting(
+  state: LifecycleState,
+  manager: ClawManager,
+  user: UserInfo,
+  kv: KVNamespace,
+  wsUrl: string,
+  proxyUrl?: string,
+  tunnelToken?: string,
+  bridgeHostHeader = "",
+  controlFetch?: ControlFetch,
+): Promise<{ action: string; error?: string }> {
   console.log(`[Lifecycle] 用户 ${user.name}: 准备注入 bridge.py...`);
 
   // 顺序必须严格：只有控制面确认实例 AVAILABLE 后，才允许获取 ticket 和注入 bridge。
@@ -380,7 +392,7 @@ async function phaseInjecting(state: LifecycleState, manager: ClawManager, user:
   state.nextActionAt = now + INJECTION_STEP_LEASE_MS;
   await saveLifecycleState(kv, state);
 
-  const client = new ClawWsClient(user, proxyUrl);
+  const client = new ClawWsClient(user, proxyUrl, controlFetch);
 
   // 新建实例分两轮注入：第一轮只发送 reset，然后保存阶段并退出。
   // 避免在同一次 Worker scheduled 事件里 reset + 等重启 + 第二条注入，导致运行时间过长时只发出第一条消息。
@@ -528,6 +540,7 @@ async function phaseRunning(
   proxyUrl?: string,
   tunnelToken?: string,
   bridgeHostHeader = "",
+  controlFetch?: ControlFetch,
 ): Promise<{ action: string; error?: string }> {
   const now = Date.now();
 
@@ -587,7 +600,7 @@ async function phaseRunning(
       state.injectionStage = undefined;
       await saveLifecycleState(kv, state);
       const bridgeWsUrl = appendBridgeToken(wsUrl, await getBridgeToken(kv));
-      return phaseInjecting(state, manager, user, kv, bridgeWsUrl, proxyUrl, tunnelToken, bridgeHostHeader);
+      return phaseInjecting(state, manager, user, kv, bridgeWsUrl, proxyUrl, tunnelToken, bridgeHostHeader, controlFetch);
     }
 
     console.warn(`[Lifecycle] 用户 ${user.name}: 运行态但无可用 bridge，回到 idle 重新创建`);
@@ -619,7 +632,15 @@ async function phaseRunning(
   return { action: "rotate" };
 }
 
-async function phaseDestroying(state: LifecycleState, manager: ClawManager, user: UserInfo, kv: KVNamespace, proxyUrl?: string, safety?: LifecycleSafety): Promise<{ action: string; error?: string }> {
+async function phaseDestroying(
+  state: LifecycleState,
+  manager: ClawManager,
+  user: UserInfo,
+  kv: KVNamespace,
+  proxyUrl?: string,
+  safety?: LifecycleSafety,
+  controlFetch?: ControlFetch,
+): Promise<{ action: string; error?: string }> {
   console.log(`[Lifecycle] 用户 ${user.name}: 销毁旧实例...`);
 
   if (isProtectedLastConnector(user, safety, state)) {
@@ -631,7 +652,7 @@ async function phaseDestroying(state: LifecycleState, manager: ClawManager, user
   // 尝试通过 AI 指令关机
   const status = await manager.getStatus();
   if (status.status === "AVAILABLE") {
-    const client = new ClawWsClient(user, proxyUrl);
+    const client = new ClawWsClient(user, proxyUrl, controlFetch);
     const ticket = await manager.getTicket();
     if (ticket && await connectWithRetry(client, ticket, 3, 3000)) {
       const reply = await client.sendMessage(SHUTDOWN_PROMPT, MAX_SHUTDOWN_REPLY_SECONDS);

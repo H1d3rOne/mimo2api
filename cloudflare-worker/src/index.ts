@@ -23,6 +23,8 @@ import { getBridgeCode, getSetupScript } from "./claw-ws-client";
 import { loadNetworkConfig } from "./network-config";
 import { appendBridgeToken, getBridgeToken } from "./bridge-auth";
 import { convertResponsesRequestToChat, loadEndpointConversionConfig, transformChatCompletionResponseToResponses } from "./endpoint-conversion";
+import { getControlChannelMode, getGatewayEgressFetch, getControlChannelLabel, getControlProxyUrl } from "./control-channel";
+import { ClawManager } from "./claw-manager";
 import type { Env } from "./types";
 
 export { GatewayDurableObject } from "./gateway-do";
@@ -157,8 +159,9 @@ async function buildLifecycleSafety(env: Env): Promise<LifecycleSafety> {
     activeNodeUserIds,
     activeNodes,
     destroyingCount,
-    // 只有使用 MIMO_PROXY_URL 时才保护最后一个 connector；直连模式不需要。
-    protectLastConnector: Boolean(env.MIMO_PROXY_URL),
+    // 只有使用依赖 Claw 容器内 cloudflared 的 MIMO_PROXY_URL 时才保护最后一个 connector；
+    // Gateway EGRESS / direct fetch 不需要。
+    protectLastConnector: getControlChannelMode(env) === "proxy",
   };
 }
 
@@ -416,7 +419,16 @@ async function handleScheduled(env: Env): Promise<void> {
   for (const userId of userIds) {
     try {
       const safety = await buildLifecycleSafety(env);
-      const result = await lifecycleTick(env.MIMO_KV, userId, wsUrl, env.MIMO_PROXY_URL, env.MIMO_TUNNEL_TOKEN, safety, networkConfig.bridge_connect_host || "");
+      const result = await lifecycleTick(
+        env.MIMO_KV,
+        userId,
+        wsUrl,
+        getControlProxyUrl(env),
+        env.MIMO_TUNNEL_TOKEN,
+        safety,
+        networkConfig.bridge_connect_host || "",
+        getGatewayEgressFetch(env),
+      );
       if (result.error) {
         console.error(`[Scheduled] 用户 ${userId}: ${result.action} - ${result.error}`);
       } else {
@@ -516,10 +528,19 @@ export default {
 
     // 健康检查
     if (path === "/health") {
+      const controlChannelMode = getControlChannelMode(env);
       return jsonResponse({
         status: "ok",
         timestamp: Date.now(),
         gateway: "durable_object",
+        control_channel: {
+          mode: controlChannelMode,
+          label: getControlChannelLabel(controlChannelMode),
+          proxy_url_configured: Boolean(env.MIMO_PROXY_URL),
+          token_configured: Boolean(env.MIMO_TUNNEL_TOKEN),
+          vpc_service_configured: Boolean(env.MIMO_AISTUDIO),
+          egress_binding_configured: Boolean(env.EGRESS),
+        },
         tunnel: {
           proxy_url_configured: Boolean(env.MIMO_PROXY_URL),
           token_configured: Boolean(env.MIMO_TUNNEL_TOKEN),
