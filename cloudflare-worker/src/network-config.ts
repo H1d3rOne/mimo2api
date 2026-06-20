@@ -1,6 +1,10 @@
 import type { Env } from "./types";
 
 const PREFERRED_BASE_URL_KV_KEY = "config:preferred_base_url";
+const PREFERRED_BASE_URL_CACHE_TTL_MS = 60_000;
+let cachedPreferredBaseAt = 0;
+let cachedPreferredBaseEnv = "";
+let cachedPreferredBaseRaw = "";
 
 export interface NetworkConfig {
   /** 优选连接地址（Xray 风格 address），可为空。 */
@@ -70,8 +74,17 @@ function wsToBaseUrl(wsUrl: string): string {
 }
 
 export async function loadNetworkConfig(env: Env, requestUrl?: URL): Promise<NetworkConfig> {
-  const kvPreferred = (await env.MIMO_KV.get(PREFERRED_BASE_URL_KV_KEY, "text")) || "";
-  const preferredBase = normalizeBaseUrl(kvPreferred || env.MIMO2API_PREFERRED_BASE_URL || "");
+  const envPreferred = env.MIMO2API_PREFERRED_BASE_URL || "";
+  let kvPreferred = "";
+  if (cachedPreferredBaseEnv === envPreferred && Date.now() - cachedPreferredBaseAt < PREFERRED_BASE_URL_CACHE_TTL_MS) {
+    kvPreferred = cachedPreferredBaseRaw;
+  } else {
+    kvPreferred = (await env.MIMO_KV.get(PREFERRED_BASE_URL_KV_KEY, "text")) || "";
+    cachedPreferredBaseRaw = kvPreferred;
+    cachedPreferredBaseEnv = envPreferred;
+    cachedPreferredBaseAt = Date.now();
+  }
+  const preferredBase = normalizeBaseUrl(kvPreferred || envPreferred || "");
   const requestBase = requestUrl ? normalizeBaseUrl(requestUrl.origin) : "";
   const workerWs = normalizeWsUrl(env.MIMO2API_WS_URL || "") || (requestBase ? baseToWsUrl(requestBase) : "") || "wss://placeholder.workers.dev/ws";
   const workerBase = wsToBaseUrl(workerWs) || requestBase;
@@ -104,7 +117,12 @@ export async function savePreferredBaseUrl(env: Env, value: string): Promise<voi
   const normalized = normalizeBaseUrl(value);
   if (!normalized) {
     await env.MIMO_KV.delete(PREFERRED_BASE_URL_KV_KEY);
+    cachedPreferredBaseRaw = "";
+    cachedPreferredBaseAt = 0;
     return;
   }
   await env.MIMO_KV.put(PREFERRED_BASE_URL_KV_KEY, normalized);
+  cachedPreferredBaseRaw = normalized;
+  cachedPreferredBaseEnv = env.MIMO2API_PREFERRED_BASE_URL || "";
+  cachedPreferredBaseAt = Date.now();
 }

@@ -11,6 +11,10 @@ interface Env {
 }
 
 const MODEL_MAPPING_KV_KEY = "config:model_mapping";
+const MODEL_MAPPING_CACHE_TTL_MS = 60_000;
+let cachedMappingAt = 0;
+let cachedMappingEnv = "";
+let cachedMapping: Record<string, string> | null = null;
 
 // 默认映射（与项目根目录 model_mapping.json 保持一致）
 const DEFAULT_MODEL_MAPPING: Record<string, string> = {
@@ -57,16 +61,32 @@ export async function loadModelMappingFromEnvAndKv(env: Env): Promise<Record<str
   const envMapping = loadModelMappingFromEnv(env);
   if (!env.MIMO_KV) return envMapping;
 
+  const envKey = env.MODEL_MAPPING_JSON || "";
+  if (cachedMapping && cachedMappingEnv === envKey && Date.now() - cachedMappingAt < MODEL_MAPPING_CACHE_TTL_MS) {
+    return cachedMapping;
+  }
+
   const raw = await env.MIMO_KV.get(MODEL_MAPPING_KV_KEY, "text");
-  if (!raw) return envMapping;
+  if (!raw) {
+    cachedMapping = envMapping;
+    cachedMappingEnv = envKey;
+    cachedMappingAt = Date.now();
+    return envMapping;
+  }
 
   try {
     const parsed = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return { ...envMapping, ...(parsed as Record<string, string>) };
+      cachedMapping = { ...envMapping, ...(parsed as Record<string, string>) };
+      cachedMappingEnv = envKey;
+      cachedMappingAt = Date.now();
+      return cachedMapping;
     }
   } catch {}
 
+  cachedMapping = envMapping;
+  cachedMappingEnv = envKey;
+  cachedMappingAt = Date.now();
   return envMapping;
 }
 
@@ -75,6 +95,8 @@ export async function saveModelMappingToKv(env: Env, mapping: Record<string, str
     throw new Error("MIMO_KV 未绑定，无法持久化模型映射");
   }
   await env.MIMO_KV.put(MODEL_MAPPING_KV_KEY, JSON.stringify(mapping));
+  cachedMapping = null;
+  cachedMappingAt = 0;
 }
 
 export async function deleteModelMappingItem(env: Env, modelName: string): Promise<boolean> {

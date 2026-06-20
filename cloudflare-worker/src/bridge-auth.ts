@@ -1,4 +1,7 @@
 const BRIDGE_TOKEN_KV_KEY = "config:bridge_token";
+const BRIDGE_TOKEN_CACHE_TTL_MS = 10 * 60 * 1000;
+let cachedBridgeToken = "";
+let cachedBridgeTokenAt = 0;
 
 function randomToken(): string {
   const bytes = new Uint8Array(32);
@@ -7,10 +10,19 @@ function randomToken(): string {
 }
 
 export async function getBridgeToken(kv: KVNamespace): Promise<string> {
+  if (cachedBridgeToken && Date.now() - cachedBridgeTokenAt < BRIDGE_TOKEN_CACHE_TTL_MS) {
+    return cachedBridgeToken;
+  }
   const existing = await kv.get(BRIDGE_TOKEN_KV_KEY, "text");
-  if (existing) return existing;
+  if (existing) {
+    cachedBridgeToken = existing;
+    cachedBridgeTokenAt = Date.now();
+    return existing;
+  }
   const token = randomToken();
   await kv.put(BRIDGE_TOKEN_KV_KEY, token);
+  cachedBridgeToken = token;
+  cachedBridgeTokenAt = Date.now();
   return token;
 }
 

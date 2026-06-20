@@ -34,6 +34,9 @@ const CREATE_FAILURE_BACKOFF_MS = 2 * 60 * 1000;   // 创建失败后退避，�
 
 // KV storage keys
 const LIFECYCLE_KEY_PREFIX = "lifecycle:";
+const PERSISTED_MATERIAL = Symbol("persisted_lifecycle_material");
+
+type PersistedLifecycleState = LifecycleState & { [PERSISTED_MATERIAL]?: string };
 
 export interface LifecycleSafety {
   activeClients?: number;
@@ -53,24 +56,60 @@ export async function getLifecycleState(kv: KVNamespace, userId: string): Promis
   const raw = await kv.get(lifecycleKey(userId), "text");
   if (raw) {
     try {
-      return JSON.parse(raw);
+      const state = JSON.parse(raw) as PersistedLifecycleState;
+      markPersisted(state);
+      return state;
     } catch {}
   }
-  return {
+  const state: PersistedLifecycleState = {
     userId,
     phase: "idle",
     lastUpdate: Date.now(),
     servedCount: 0,
   };
+  markPersisted(state);
+  return state;
 }
 
 async function saveLifecycleState(kv: KVNamespace, state: LifecycleState): Promise<void> {
+  const currentMaterial = lifecycleMaterial(state);
+  if ((state as PersistedLifecycleState)[PERSISTED_MATERIAL] === currentMaterial) {
+    return;
+  }
   state.lastUpdate = Date.now();
   await kv.put(lifecycleKey(state.userId), JSON.stringify(state));
+  markPersisted(state as PersistedLifecycleState);
 }
 
 export async function deleteLifecycleState(kv: KVNamespace, userId: string): Promise<void> {
   await kv.delete(lifecycleKey(userId));
+}
+
+function markPersisted(state: PersistedLifecycleState): void {
+  Object.defineProperty(state, PERSISTED_MATERIAL, {
+    value: lifecycleMaterial(state),
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function lifecycleMaterial(state: LifecycleState): string {
+  // lastUpdate 只用于展示最近一次“实际状态变更”时间。
+  // 如果只因为 cron tick 经过而刷新 lastUpdate，会把 KV 写入量放大到免费额度之外。
+  const material: Record<string, unknown> = {
+    userId: state.userId,
+    phase: state.phase,
+    servedCount: state.servedCount || 0,
+  };
+  if (state.lastError !== undefined) material.lastError = state.lastError;
+  if (state.clawExpireAt !== undefined) material.clawExpireAt = state.clawExpireAt;
+  if (state.nextActionAt !== undefined) material.nextActionAt = state.nextActionAt;
+  if (state.currentRoundStart !== undefined) material.currentRoundStart = state.currentRoundStart;
+  if (state.bridgeMissingSince !== undefined) material.bridgeMissingSince = state.bridgeMissingSince;
+  if (state.bridgeOnlineAt !== undefined) material.bridgeOnlineAt = state.bridgeOnlineAt;
+  if (state.injectionStage !== undefined) material.injectionStage = state.injectionStage;
+  return JSON.stringify(material);
 }
 
 // ─── 核心：生命周期 tick ──────────────────────────────────────

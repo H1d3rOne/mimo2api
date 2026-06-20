@@ -189,16 +189,9 @@ export async function handleWebuiRoute(
       meta: n.meta || {},
     }));
 
-    const activeLifecycleUserIds = new Set<string>();
-    try {
-      const store = new UserStore(env.MIMO_KV);
-      const userIds = await store.listUserIds();
-      for (const uid of userIds) {
-        const state = await getLifecycleState(env.MIMO_KV, uid);
-        if (state.phase === "running" || state.phase === "injecting") activeLifecycleUserIds.add(uid);
-      }
-    } catch {}
-    const managedAvailableClients = nodes.filter((n) => n.available && n.user_id && activeLifecycleUserIds.has(String(n.user_id))).length;
+    // 这个接口 3 秒轮询一次，只展示 Gateway 当前可调度 bridge 数。
+    // 不再每次读 user:list + lifecycle:*，避免 WebUI 打开时把 KV 读额度刷爆。
+    const managedAvailableClients = nodes.filter((n) => n.available && n.user_id).length;
 
 	    return json({
 	      active_clients: gatewayData.activeClients || 0,

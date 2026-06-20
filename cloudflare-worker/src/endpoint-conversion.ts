@@ -1,18 +1,35 @@
 import type { Env } from "./types";
 
 const ENDPOINT_CONVERSION_KV_KEY = "config:endpoint_conversion_enabled";
+const ENDPOINT_CONVERSION_CACHE_TTL_MS = 60_000;
+let cachedEndpointConversionAt = 0;
+let cachedEndpointConversionEnv = "";
+let cachedEndpointConversion: EndpointConversionConfig | null = null;
 
 export interface EndpointConversionConfig {
   enabled: boolean;
 }
 
 export async function loadEndpointConversionConfig(env: Env): Promise<EndpointConversionConfig> {
+  const envKey = env.MIMO_ENDPOINT_CONVERSION_ENABLED || "";
+  if (
+    cachedEndpointConversion &&
+    cachedEndpointConversionEnv === envKey &&
+    Date.now() - cachedEndpointConversionAt < ENDPOINT_CONVERSION_CACHE_TTL_MS
+  ) {
+    return cachedEndpointConversion;
+  }
   const raw = (await env.MIMO_KV.get(ENDPOINT_CONVERSION_KV_KEY, "text")) || env.MIMO_ENDPOINT_CONVERSION_ENABLED || "";
-  return { enabled: raw === "true" || raw === "1" || raw.toLowerCase() === "yes" };
+  cachedEndpointConversion = { enabled: raw === "true" || raw === "1" || raw.toLowerCase() === "yes" };
+  cachedEndpointConversionEnv = envKey;
+  cachedEndpointConversionAt = Date.now();
+  return cachedEndpointConversion;
 }
 
 export async function saveEndpointConversionEnabled(env: Env, enabled: boolean): Promise<void> {
   await env.MIMO_KV.put(ENDPOINT_CONVERSION_KV_KEY, enabled ? "true" : "false");
+  cachedEndpointConversion = null;
+  cachedEndpointConversionAt = 0;
 }
 
 function generateId(prefix: string): string {

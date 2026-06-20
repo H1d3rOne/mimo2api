@@ -120,7 +120,7 @@ async function handleStatsFull(env: Env): Promise<Response> {
   });
 }
 
-async function buildLifecycleSafety(env: Env): Promise<LifecycleSafety> {
+async function buildLifecycleSafety(env: Env, knownUserIds?: string[]): Promise<LifecycleSafety> {
   let gatewayData: Record<string, unknown> = {};
   try {
     gatewayData = await gatewayStats(env);
@@ -146,8 +146,7 @@ async function buildLifecycleSafety(env: Env): Promise<LifecycleSafety> {
 
   let destroyingCount = 0;
   try {
-    const store = new UserStore(env.MIMO_KV);
-    const userIds = await store.listUserIds();
+    const userIds = knownUserIds || await new UserStore(env.MIMO_KV).listUserIds();
     for (const uid of userIds) {
       const state = await getLifecycleState(env.MIMO_KV, uid);
       if (state.phase === "destroying") destroyingCount++;
@@ -418,7 +417,7 @@ async function handleScheduled(env: Env): Promise<void> {
 
   for (const userId of userIds) {
     try {
-      const safety = await buildLifecycleSafety(env);
+      const safety = await buildLifecycleSafety(env, userIds);
       const result = await lifecycleTick(
         env.MIMO_KV,
         userId,
